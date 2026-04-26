@@ -49,7 +49,7 @@ You're already onboarded. Daily flow:
 - `/setcommands` (optional, for autocomplete) — see `Commands` section
 
 ### Files
-- `.env` at `~/code/resume-bot/` populated (see Setup)
+- `.env` at `~/Documents/resume-builder/` populated (see Setup)
 - `~/bot/secrets/li_cookies.json` (currently NOT loaded — see ADR-002 — but kept for future flows)
 
 ---
@@ -57,9 +57,9 @@ You're already onboarded. Daily flow:
 ## Setup
 
 ### Layout
-- **Code:** `~/code/resume-bot/` (TypeScript, NodeNext ESM)
+- **Code:** `~/Documents/resume-builder/` (TypeScript, NodeNext ESM)
 - **Workspace data:** `~/bot/` (separate, never wiped by code-clean operations)
-- **Docs:** `~/code/resume-bot/docs/` (this file, `tasks.md`, `decisions.md`, `resume-bot-design.md`). Symlinked to `~/Documents/resume-builder/` for backward compat.
+- **Docs:** `~/Documents/resume-builder/docs/` (this file, `tasks.md`, `decisions.md`, `resume-bot-design.md`). Symlinked to `~/Documents/resume-builder/` for backward compat.
 
 ### `.env`
 ```ini
@@ -78,7 +78,7 @@ QUALITY_THRESHOLD=80               # critic threshold; refinement below this
 
 ### Boot
 ```bash
-cd ~/code/resume-bot
+cd ~/Documents/resume-builder
 npm install
 npm run init-workspace          # mkdirs ~/bot/{users,archive,logs,templates,secrets}, chmod 700
 npm run build
@@ -369,13 +369,13 @@ Note: this consumes updates if the bot isn't running. Don't run while bot is run
 ## Operations
 
 ### Running
-- Foreground: `cd ~/code/resume-bot && npm start` in tmux
+- Foreground: `cd ~/Documents/resume-builder && npm start` in tmux
 - Or `npm run dev` for hot-reload during development
 - One instance only. Multiple = 409 Conflict on getUpdates
 
 ### Updating
 ```bash
-cd ~/code/resume-bot
+cd ~/Documents/resume-builder
 git pull   # if you've git-init'd
 npm install
 npm run build
@@ -423,7 +423,7 @@ ORDER BY day DESC;
 2. (Optional) `tar czf ~/Backups/bot-final-$(date +%Y%m%d).tgz ~/bot/`
 3. (Optional) `rm -rf ~/bot/`
 4. `@BotFather` → `/deletebot` to revoke the token
-5. `rm -rf ~/code/resume-bot/`
+5. `rm -rf ~/Documents/resume-builder/`
 
 ---
 
@@ -456,7 +456,7 @@ ORDER BY day DESC;
 - **`tasks.md`** — chronological build log, by step, with smoke checklists
 - **`decisions.md`** — architecture decision records (ADRs) with rationale
 - **`resume-bot-design.md`** — original v1 design spec (frozen as historical reference)
-- **`~/code/resume-bot/CLAUDE.md`** — instructions for AI dev sessions on this codebase (auto-discovered)
-- **`~/code/resume-bot/scripts/docs-sync.sh`** — claude-driven doc audit + update tool
+- **`~/Documents/resume-builder/CLAUDE.md`** — instructions for AI dev sessions on this codebase (auto-discovered)
+- **`~/Documents/resume-builder/scripts/docs-sync.sh`** — claude-driven doc audit + update tool
 
 When you build a new feature: update `how-to-journey.md`, append to `decisions.md` if the choice was non-obvious, and (if you've git-init'd) commit them in the same change. Or run `npm run docs:sync` to have claude do it for you.

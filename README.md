@@ -16,7 +16,7 @@ Personal-scale: runs on a laptop, uses your Claude Code CLI subscription, ~3 fri
 
 ### Install
 ```bash
-cd ~/code/resume-bot
+cd ~/Documents/resume-builder
 npm install
 npx playwright install chromium
 cp .env.example .env             # then fill in token + chat_ids
@@ -38,7 +38,7 @@ npm start
 ## Architecture
 
 ```
-~/code/resume-bot/        ← code (this repo)
+~/Documents/resume-builder/        ← code (this repo)
 ~/bot/                    ← workspace data (separate from code)
   users/<chat_id>/
     base_resume.md        ← master resume

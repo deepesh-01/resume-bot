@@ -4,13 +4,13 @@
 
 Each unit is sized ≤30 minutes. Stack pinned per §13.10: TypeScript, ESM, grammY, zx, better-sqlite3, playwright, pino. No unit tests in v1.
 
-Project root: `~/code/resume-bot/` (separate from workspace data at `~/bot/`).
+Project root: `~/Documents/resume-builder/` (separate from workspace data at `~/bot/`).
 
 ---
 
 ## 1.1 — Project init (15 min)
 
-- `mkdir -p ~/code/resume-bot/{src,templates,scripts}` and `cd` in
+- `mkdir -p ~/Documents/resume-builder/{src,templates,scripts}` and `cd` in
 - `npm init -y`, then edit `package.json`:
   - `"type": "module"`
   - `"engines": { "node": ">=20" }`

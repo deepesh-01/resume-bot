@@ -9,7 +9,7 @@ Auto-discovered by Claude Code when working in this repo. Read this first.
 - **Bot framework:** grammY
 - **DB:** SQLite via better-sqlite3 (schema inlined in `src/db.ts`)
 - **PDF render:** pandoc → typst (templates/resume.typ)
-- **Code path:** `~/code/resume-bot/`
+- **Code path:** `~/Documents/resume-builder/`
 - **Workspace data:** `~/bot/` (separate; never wipe with code clean)
 - **Docs:** `docs/` inside this repo — `how-to-journey.md`, `tasks.md`, `decisions.md`, `resume-bot-design.md`
 
@@ -110,7 +110,7 @@ Auto-discovered by Claude Code when working in this repo. Read this first.
 ## Build / restart loop
 
 ```bash
-cd ~/code/resume-bot
+cd ~/Documents/resume-builder
 npm run typecheck    # quick TS check, no emit
 npm run build        # produces dist/
 PID=$(pgrep -f "node dist/index.js" | head -1)
