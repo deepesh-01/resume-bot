@@ -11,7 +11,7 @@ Auto-discovered by Claude Code when working in this repo. Read this first.
 - **PDF render:** pandoc → typst (templates/resume.typ)
 - **Code path:** `~/code/resume-bot/`
 - **Workspace data:** `~/bot/` (separate; never wipe with code clean)
-- **Docs:** `/Users/deepeshz2/Documents/resume-builder/` (`how-to-journey.md`, `tasks.md`, `decisions.md`, `resume-bot-design.md`)
+- **Docs:** `docs/` inside this repo — `how-to-journey.md`, `tasks.md`, `decisions.md`, `resume-bot-design.md`
 
 ## When you add or modify a feature
 

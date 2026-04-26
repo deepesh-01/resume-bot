@@ -60,13 +60,11 @@ Three claude calls per job (lever A): **tailor** (A) → **critic** (D, JSON-out
 
 ## Documentation
 
-All under `~/Documents/resume-builder/`:
-
-- **[`how-to-journey.md`](../../Documents/resume-builder/how-to-journey.md)** — full operational guide: setup, command reference, flows, debugging, ops, failure modes
-- **[`tasks.md`](../../Documents/resume-builder/tasks.md)** — chronological build log with smoke checklists per step
-- **[`decisions.md`](../../Documents/resume-builder/decisions.md)** — architecture decision records (Typst vs LaTeX, cookies-dropped, threshold values, lever A, etc.)
-- **[`resume-bot-design.md`](../../Documents/resume-builder/resume-bot-design.md)** — original v1 spec (frozen)
-- **[`CLAUDE.md`](./CLAUDE.md)** — instructions for AI dev sessions on this codebase
+- **[docs/how-to-journey.md](./docs/how-to-journey.md)** — full operational guide: setup, command reference, flows, debugging, ops, failure modes
+- **[docs/tasks.md](./docs/tasks.md)** — chronological build log with smoke checklists per step
+- **[docs/decisions.md](./docs/decisions.md)** — architecture decision records (Typst vs LaTeX, cookies-dropped, threshold values, lever A, etc.)
+- **[docs/resume-bot-design.md](./docs/resume-bot-design.md)** — original v1 spec (frozen)
+- **[CLAUDE.md](./CLAUDE.md)** — instructions for AI dev sessions on this codebase
 
 ---
 

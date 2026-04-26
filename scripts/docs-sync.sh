@@ -20,7 +20,7 @@ case "$MODE" in
 esac
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-DOCS_DIR="$HOME/Documents/resume-builder"
+DOCS_DIR="$REPO_ROOT/docs"
 
 [ -d "$DOCS_DIR" ] || { echo "docs dir not found: $DOCS_DIR" >&2; exit 1; }
 
