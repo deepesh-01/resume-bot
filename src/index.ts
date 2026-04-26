@@ -24,6 +24,7 @@ import { resetHandler } from './handlers/reset.js'
 import { helpHandler } from './handlers/help.js'
 import { commandsHandler } from './handlers/commands.js'
 import { restartHandler } from './handlers/restart.js'
+import { userStatusHandler } from './handlers/userStatus.js'
 import { callbackRouter } from './handlers/callbacks.js'
 import { PUBLIC_COMMAND_MENU, ADMIN_COMMAND_MENU } from './menus.js'
 import {
@@ -60,6 +61,7 @@ bot.command('revoke', revokeHandler)
 bot.command('block', blockHandler)
 bot.command('unblock', unblockHandler)
 bot.command('restart', restartHandler)
+bot.command('userstatus', userStatusHandler)
 bot.on('callback_query:data', callbackRouter)
 bot.on('message:document', documentHandler)
 bot.on('message:text', jobMessageHandler)

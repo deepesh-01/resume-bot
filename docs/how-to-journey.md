@@ -148,6 +148,7 @@ This layering is **why split pastes work cleanly**: layer 5 opens a buffer; subs
 | `/block CHAT_ID [reason...]` | Same as revoke + adds to blocked_users + DM with the block notice |
 | `/unblock CHAT_ID` | Remove from blocked_users (does NOT re-grant; they need to /start again) |
 | `/restart` | Graceful self-restart (writes `.restart-reason` → SIGINT → watchdog respawns within ~2 min and DMs admins). Equivalent to `POST /restart` from inside Telegram. |
+| `/userstatus CHAT_ID` | Drill into one user: identity, allow/block state, jobs total + recent 5, all-time/7d/24h spend, 7d breakdown by call type, last claude call. `/users` renders a tappable button per row that fires this. |
 
 ### Headless CLI (System B integration, ADR-021)
 
@@ -176,6 +177,7 @@ alongside bot-created jobs.
 - After `/reset JOB_ID` confirmation: tap [🗑️ Wipe job] / [❌ Cancel]
 - After `/reupload` (post-onboarding) or `/reonboard` confirmation: tap [✅ Yes ...] / [❌ Cancel]
 - After friend onboarding admin notification: tap [✅ Approve · 7 days] / [❌ Reject]
+- After `/users` (admin): tap any [📊 @user] button to fire the `userstatus:<chat_id>` callback — same content as `/userstatus CHAT_ID`
 
 ---
 
@@ -293,7 +295,8 @@ The critic is **read-only** (`--allowedTools Read`) and outputs structured JSON:
 │   accessRequest, accessApproval,     │
 │   admin (pending/allow/deny/users    │
 │         /revoke/block/unblock),      │
-│   restart, resetActions, resetJob,   │
+│   restart, userStatus,               │
+│   resetActions, resetJob,            │
 │   callbacks                          │
 └────────────┬─────────────────────────┘
              │

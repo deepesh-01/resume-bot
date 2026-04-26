@@ -121,6 +121,7 @@ for (const sql of migrations) {
 export interface UserRow {
   chat_id: number
   display_name: string | null
+  username: string | null  // added in QOL.3 migration
   created_at: string
   base_path: string | null
   onboarded: number

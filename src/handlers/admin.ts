@@ -124,7 +124,23 @@ export const usersHandler = async (ctx: BotContext): Promise<void> => {
     'Manage: <code>/revoke ID</code> · <code>/block ID</code> · <code>/unblock ID</code>',
   )
 
-  await ctx.reply(lines.join('\n'), { parse_mode: 'HTML' })
+  // One tappable "📊 …" button per allowed user → opens /userstatus for them.
+  // 2 buttons per row keeps the keyboard readable on small screens. Blocked
+  // users get the same drill-in (their history is still useful).
+  const allRows = [...allowed, ...blocked]
+  const buttons = allRows.map((u) => ({
+    text: `📊 ${u.username ? `@${u.username}` : String(u.chat_id)}`,
+    callback_data: `userstatus:${u.chat_id}`,
+  }))
+  const inline_keyboard: { text: string; callback_data: string }[][] = []
+  for (let i = 0; i < buttons.length; i += 2) {
+    inline_keyboard.push(buttons.slice(i, i + 2))
+  }
+
+  await ctx.reply(lines.join('\n'), {
+    parse_mode: 'HTML',
+    reply_markup: inline_keyboard.length > 0 ? { inline_keyboard } : undefined,
+  })
 }
 
 // /revoke <chat_id> — soft remove from allowed_users + archive their active jobs.

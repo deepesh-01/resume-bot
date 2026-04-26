@@ -32,4 +32,5 @@ export const ADMIN_COMMAND_MENU: ReadonlyArray<{
   { command: 'block', description: 'block a user: /block chat_id' },
   { command: 'unblock', description: 'unblock a user: /unblock chat_id' },
   { command: 'restart', description: 'restart the bot via watchdog' },
+  { command: 'userstatus', description: 'drill into a user: /userstatus chat_id' },
 ]

@@ -1231,3 +1231,41 @@ If quality lifts noticeably, no need for lever (c). If it doesn't move (or moves
 - [ ] Set `CLAUDE_WEEKLY_BUDGET_USD=0.10` and run a job → admins get a single DM `⚠️ Claude weekly spend at NN% of cap …`. Re-run within 24h → no second DM. After 24h → eligible to re-fire.
 - [ ] Set `HEALTHCHECKS_URL` to a valid Healthchecks.io URL → check shows `up` within 60s of bot start. Stop the bot → check transitions to `down` after the configured grace period.
 - [ ] All env vars are optional — bot boots cleanly with `CLAUDE_WEEKLY_BUDGET_USD=` and `HEALTHCHECKS_URL=` empty (no warnings, no crashes).
+
+---
+
+# Build Step UserStatus — admin drill-in for "who's active and how much did it cost"
+
+*Closing the gap between `/users` (a flat list) and "I want to see this one user's whole picture without writing SQL". The bot already has the data — usage rows are tagged with `chat_id` and `invocation_type`, jobs rows have `quality_score` and `last_active_at`. We just need a focused query + render.*
+
+## US.1 — `src/handlers/userStatus.ts` (15 min)
+- Exported `formatUserStatus(chat_id: number): string` that renders the full picture as HTML in a single message:
+  - Identity: chat_id, @username, display_name, joined timestamp, onboarded flag.
+  - Allow/block state: allowed_at + expiry, OR blocked_at + reason, OR "users-table row but not on allowlist", OR "no users-row but found in usage history".
+  - Activity: total job count, active job (id + status + score), last claude call (type + cost + timestamp).
+  - Spend: 24h / 7d / all-time totals + run counts.
+  - 7d breakdown by `invocation_type` (with human label: tailor / critic / refine / edit).
+  - Recent 5 jobs with status emoji, role/company subject, and quality score.
+- Two entry points share the formatter: `userStatusHandler` (slash) and `userStatusCallback` (inline button).
+
+## US.2 — Callback wiring (5 min)
+- New prefix `userstatus:<chat_id>` registered in `src/handlers/callbacks.ts` `callbackRouter`.
+- Per CLAUDE.md convention: prefix-based dispatch only, no `bot.on('callback_query:data', …)` siblings.
+
+## US.3 — `/users` becomes drill-in-able (10 min)
+- `usersHandler` now appends an `inline_keyboard` to the existing reply: one `📊 @username` (or `📊 chat_id`) button per allowed and blocked user, packed two per row.
+- Tapping a button fires the `userstatus:<chat_id>` callback, same content as the slash command.
+
+## US.4 — Wire registrations (5 min)
+- `src/index.ts`: `bot.command('userstatus', userStatusHandler)`.
+- `src/menus.ts` `ADMIN_COMMAND_MENU`: `{ command: 'userstatus', description: 'drill into a user: /userstatus chat_id' }` — surfaces in Telegram autocomplete only for admin chats (per `setMyCommands` chat-scoped registration in ADR-025).
+- `src/middleware/preOnboarding.ts` `ONBOARDING_COMMANDS`: `'userstatus'` allowlisted alongside `'restart'` so an admin in a weird onboarding state isn't blocked.
+- `src/db.ts` `UserRow`: `username` field added to the type (the column was added by the QOL.3 migration but the type didn't reflect it).
+
+## US.5 — Smoke checklist
+- [ ] `/userstatus 1089113785` (admin) returns the full report with all five sections present and at least one row in `7d breakdown by call type`.
+- [ ] `/userstatus 99999999` (unknown chat_id) replies `No user with chat_id <99999999> in db.` instead of a half-empty report.
+- [ ] `/userstatus` with no arg replies with the usage hint, not a crash.
+- [ ] Non-admin chat sending `/userstatus 1089113785` gets no reply (silent ignore, same pattern as `/users`).
+- [ ] `/users` (admin) renders an inline keyboard with one `📊 …` button per allowed + blocked user. Tapping a button fires the `userstatus:` callback and posts the report as a fresh message.
+- [ ] Telegram autocomplete in admin chat shows `userstatus` after typing `/`. In a non-admin chat, autocomplete does NOT show it.
