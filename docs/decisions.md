@@ -314,4 +314,27 @@
 
 ---
 
+## ADR-020 · Code lives at `~/Documents/resume-builder/` (not `~/code/resume-bot/`)
+**Date:** 2026-04-26 · **Status:** Accepted (consolidation)
+
+**Context.** The original §13.10 build prompt prescribed `~/code/resume-bot/` for code and `~/Documents/resume-builder/` for the design doc. That split made docs and code live in different repos:
+- Broke GitHub README links (relative paths to docs at `~/Documents/...` couldn't resolve from a repo at `~/code/...`)
+- Required a `docs/` subdir migration anyway (between commits 0384dcc and 7497197)
+- Two separate working directories with different histories was friction without payoff
+
+**Decision.** Consolidate everything into `~/Documents/resume-builder/`. Code, docs, .git, .env, node_modules — all under one root. Removed `~/code/resume-bot/` entirely.
+
+**Reasoning.**
+- One working directory means one `cd`, one git remote, one `npm install`.
+- Docs and code share a repo, so README links resolve naturally on GitHub.
+- The historical split was prescribed for "workspace data separate from code" cleanliness — but workspace data is at `~/bot/`, and that separation IS preserved. The code-vs-docs split was incidental, not load-bearing.
+
+**Consequence.**
+- Instructions in `tasks.md` (historical build log) and `resume-bot-design.md` (frozen v1 spec) referencing `~/code/resume-bot/` were left in place to preserve build history. Forward-looking text uses `~/Documents/resume-builder/`.
+- `.git` moved with rsync; remote URL unchanged (`origin = https://github.com/deepesh-01/resume-bot.git`).
+- Pre-commit hook intact at `.git/hooks/pre-commit`.
+- `~/bot/` workspace data unchanged.
+
+---
+
 *New decisions append below this line.*
