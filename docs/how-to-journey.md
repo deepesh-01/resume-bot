@@ -14,7 +14,7 @@ A private Telegram bot that tailors your resume to specific job descriptions. Se
 3. **Claude Code CLI** (`claude -p`) — does the actual tailoring/critique/refinement work
 
 **Three persistence layers:**
-1. **SQLite** at `~/bot/db.sqlite` — users, jobs, usage, allowed_users, pending_access, blocked_users
+1. **SQLite** at `~/bot/db.sqlite` — users, jobs, messages, usage, allowed_users, pending_access, blocked_users
 2. **Per-user workspaces** at `~/bot/users/<chat_id>/` — base_resume.md, CLAUDE.md, context.md, jobs/
 3. **Archive** at `~/bot/archive/<chat_id>/<job_id>.tar.gz` — jobs idle >30 days
 
@@ -74,6 +74,8 @@ DB_PATH=/Users/deepeshz2/bot/db.sqlite
 PLAYWRIGHT_LINKEDIN_COOKIE_PATH=/Users/deepeshz2/bot/secrets/li_cookies.json
 NODE_ENV=development
 QUALITY_THRESHOLD=80               # critic threshold; refinement below this
+HEALTH_PORT=8787                   # /healthz + /restart HTTP endpoint port; 0 disables
+WATCHDOG_RESTART_TOKEN=            # required header for POST /restart; empty disables it
 ```
 
 ### Boot
@@ -119,6 +121,7 @@ This layering is **why split pastes work cleanly**: layer 5 opens a buffer; subs
 |---|---|
 | `/start` | Begin onboarding (if non-allowlisted: trigger access request flow) |
 | `/help` | This reference |
+| `/commands` | Tappable list of available commands — admins also see admin commands |
 | `/confirm` | Accept extracted resume during onboarding |
 | `/reupload` | During onboarding: re-upload the staged file. After onboarding: confirmation prompt → clears base_resume + onboarded=0 (keeps context.md, jobs) |
 | `/reonboard` | Full reset: clears base_resume + CLAUDE.md + context.md, archives active jobs |
@@ -142,6 +145,7 @@ This layering is **why split pastes work cleanly**: layer 5 opens a buffer; subs
 | `/revoke CHAT_ID` | Remove from allowed_users + archive their active jobs + DM |
 | `/block CHAT_ID [reason...]` | Same as revoke + adds to blocked_users + DM with the block notice |
 | `/unblock CHAT_ID` | Remove from blocked_users (does NOT re-grant; they need to /start again) |
+| `/restart` | Graceful self-restart (writes `.restart-reason` → SIGINT → watchdog respawns within ~2 min and DMs admins). Equivalent to `POST /restart` from inside Telegram. |
 
 ### Headless CLI (System B integration, ADR-021)
 
@@ -185,7 +189,7 @@ alongside bot-created jobs.
 1. Send URL or paste JD text (≥200 chars)
 2. **Tailor pass** (§13.1 invocation A): claude -p with cwd=jobDir, edits resume.md in place, writes last_change.txt
 3. **Critic pass** (lever A, type D): claude reads files, scores 0-100, lists gaps + violations, JSON output
-4. **Refinement** (type E, --resume): only if score < 80 OR violations exist; applies critic's gap+violation list to resume.md
+4. **Refinement** (type E, --resume): only if (score < QUALITY_THRESHOLD OR violations exist) AND (gaps OR violations are non-empty) — i.e. a low score with no actionable gaps/violations does NOT trigger a refinement pass; applies critic's gap+violation list to resume.md
 5. **Render**: pandoc → resume_body.typ, copy templates/resume.typ → resume.typ, typst compile → final.pdf
 6. **Reply**: PDF doc + caption "v1 ready. {summary} · 🎯 {score}/100 (refined)" + follow-up message with attribute scores, gaps addressed, claims removed
 
@@ -279,14 +283,16 @@ The critic is **read-only** (`--allowedTools Read`) and outputs structured JSON:
 │   allowlist  → blocked? allowed? request? reject  │
 │   preOnboarding → onboarded? command-allowed?     │
 │ src/handlers/                        │
-│   start, help, confirm, reupload,    │
-│   reonboard, context, status, jobs,  │
-│   edit, reset, done, save,           │
-│   document, jobMessage,              │
+│   start, help, commands, confirm,    │
+│   reupload, reonboard, context,      │
+│   status, jobs, edit, reset, done,   │
+│   save, document, jobMessage,        │
+│   disambiguate,                      │
 │   accessRequest, accessApproval,     │
 │   admin (pending/allow/deny/users    │
 │         /revoke/block/unblock),      │
-│   resetActions, resetJob, callbacks  │
+│   restart, resetActions, resetJob,   │
+│   callbacks                          │
 └────────────┬─────────────────────────┘
              │
        ┌─────▼──────────────────────┐
@@ -319,6 +325,9 @@ The critic is **read-only** (`--allowedTools Read`) and outputs structured JSON:
 - `src/access.ts` — admin notify, code generation
 - `src/disambiguate.ts` + `src/savePending.ts` — pending-state stores
 - `src/middleware/allowlist.ts` + `preOnboarding.ts` — gates
+- `src/heartbeat.ts` — heartbeat tick + `~/bot/.bot.pid` writer + `~/bot/.restart-reason` path (ADR-022, ADR-025)
+- `src/health.ts` — `/healthz` + `/restart` HTTP endpoints, async `stopHealthServer` for clean port release (ADR-023, ADR-025)
+- `src/menus.ts` — single source of truth for the Telegram command menu used by `/commands` and `setMyCommands` autocomplete (ADR-025)
 - `src/textDebounce.ts` — REMOVED (ADR-016 superseded it)
 
 ---
@@ -370,37 +379,42 @@ Note: this consumes updates if the bot isn't running. Don't run while bot is run
 
 ---
 
-## Self-healing: heartbeat + watchdog (ADR-022)
+## Self-healing: heartbeat + watchdog (ADR-022, ADR-025)
 
-The bot has two-part auto-recovery:
+The bot has two-part auto-recovery driven by three workspace files (all in `~/bot/`, never `~/Documents/`):
 
-**Heartbeat** — bot writes current epoch ms to `~/bot/.heartbeat` every 60s while running.
+| File | Written by | Used by | Purpose |
+|---|---|---|---|
+| `.heartbeat` | bot (every 60s) | watchdog | freshness signal — primary liveness check |
+| `.bot.pid` | bot (on start, removed on graceful stop) | watchdog | authoritative pid for kill-on-hang |
+| `.restart-reason` | `/restart` HTTP, `/restart` Telegram | watchdog | attribution string for the next DM |
 
-**Watchdog** — `scripts/watchdog.sh` runs every 2 minutes via launchd:
-- If no bot process matching this repo's `cwd` exists → restart
-- If heartbeat file is older than 180s → kill stuck bot + restart
-- After any restart: DMs admin via Telegram with the reason
+**Watchdog logic** (`scripts/watchdog.sh`, deployed to `~/bot/bin/watchdog.sh` — see ADR-025):
+1. If `~/bot/.heartbeat` is fresh (≤180s old) → exit 0 silently. **No `lsof`/`pgrep`** in the happy path.
+2. Stale or missing → read `~/bot/.bot.pid`. If pid is alive → bot is hung → SIGINT, wait 5s, SIGKILL, restart. If pid dead/missing → just start a fresh bot.
+3. After respawn, read + delete `~/bot/.restart-reason`. DM admin with attribution.
 
 **Install once:**
 ```bash
 bash scripts/install-watchdog.sh
 ```
-Loads `~/Library/LaunchAgents/com.deepesh.resume-bot-watchdog.plist`. Survives logout. Unload with `bash scripts/uninstall-watchdog.sh`.
+Copies `scripts/watchdog.sh` → `~/bot/bin/watchdog.sh` and the relevant `.env` keys → `~/bot/.watchdog.env` (chmod 600). Loads `~/Library/LaunchAgents/com.deepesh.resume-bot-watchdog.plist`. Survives logout. Re-run after editing `scripts/watchdog.sh`. Unload with `bash scripts/uninstall-watchdog.sh`.
 
 **Verify it's running:**
 ```bash
-launchctl print "gui/$(id -u)/com.deepesh.resume-bot-watchdog" | grep state
+launchctl print "gui/$(id -u)/com.deepesh.resume-bot-watchdog" | grep "last exit"   # want: last exit code = 0
 tail -f ~/bot/logs/watchdog.log
 ```
 
 **What you'll see in your Telegram chat:**
-- Nothing during normal operation.
-- `🔄 Bot was hung (heartbeat 245s stale, threshold 180s). Watchdog killed and restarted.` when a hang is auto-recovered.
-- `🔄 Bot was down (no process running). Watchdog restarted it.` after a crash.
+- Nothing during normal operation. Healthy ticks log to `watchdog.log` ~10% of the time as `ok (heartbeat_age=…)`.
+- `⚠️ Bot crashed (no process running) · respawned by resume-builder watchdog · 14:22 IST` after an unattributed crash.
+- `🔄 Bot was hung (heartbeat 245s stale, threshold 180s) · killed + restarted by resume-builder watchdog · 14:22 IST` when a hang is auto-recovered.
+- `🔄 Bot restarted: <reason> · respawned by resume-builder watchdog · 14:22 IST` when something asked for the restart. Reason values:
+  - `HTTP /restart from <X-Watchdog-Source>` — third-party uptime monitor or scripted restart.
+  - `Telegram /restart by @user` — admin invoked the `/restart` command.
 
 **What it doesn't catch:** laptop entirely off. For that, add an external dead-man's-switch (e.g., Healthchecks.io ping every hour from the bot itself — see ADR-022 consequence).
-
-**macOS permission gotcha:** `~/Documents/` is gated by macOS's "Files & Folders" privacy. launchd-spawned bash gets `Operation not permitted` when it tries to read `scripts/watchdog.sh`. Fix once: System Settings → Privacy & Security → Full Disk Access → click + → Cmd+Shift+G → type `/bin/bash` → add it. Re-run `bash scripts/install-watchdog.sh`. Verify: `launchctl print "gui/$(id -u)/com.deepesh.resume-bot-watchdog" | grep "last exit"` should show `0`. If `126`, permission still missing.
 
 ---
 
@@ -409,7 +423,7 @@ tail -f ~/bot/logs/watchdog.log
 For third-party uptime monitors (UptimeRobot, BetterUptime, Healthchecks.io, custom) to check liveness AND trigger restart on hang, the bot exposes:
 
 - `GET http://127.0.0.1:8787/healthz` — no auth. 200 if heartbeat fresh, 503 if stale (>180s) or missing. JSON body includes `heartbeat_age_ms` so monitors can graph it.
-- `POST http://127.0.0.1:8787/restart` — requires `X-Watchdog-Token` header matching `WATCHDOG_RESTART_TOKEN` env. On match: 202 + bot exits → launchd watchdog respawns within 2 min.
+- `POST http://127.0.0.1:8787/restart` — requires `X-Watchdog-Token` header matching `WATCHDOG_RESTART_TOKEN` env. Optional `X-Watchdog-Source: <name>` header attributes the restart in the post-respawn DM (e.g. `X-Watchdog-Source: healthchecks.io` → DM says `🔄 Bot restarted: HTTP /restart from healthchecks.io · …`). On match: 202 + bot SIGINTs itself → launchd watchdog respawns within 2 min.
 
 **Bound to 127.0.0.1 only.** Expose to the internet deliberately via:
 - **Cloudflare Tunnel** (recommended; persistent, free): `cloudflared tunnel --url http://127.0.0.1:8787`
@@ -427,7 +441,7 @@ Leaving it empty disables the `/restart` endpoint entirely (returns 501).
 ```bash
 curl -s http://127.0.0.1:8787/healthz
 TOKEN=$(grep '^WATCHDOG_RESTART_TOKEN=' .env | cut -d= -f2-)
-curl -X POST -H "X-Watchdog-Token: $TOKEN" http://127.0.0.1:8787/restart
+curl -X POST -H "X-Watchdog-Token: $TOKEN" -H "X-Watchdog-Source: smoke-test" http://127.0.0.1:8787/restart
 ```
 
 **Disable the HTTP server entirely:** set `HEALTH_PORT=0` in `.env`.
@@ -522,6 +536,9 @@ ORDER BY day DESC;
 - **Friend session auto-expires** — no permanent-access drift
 - **Block check before allow check** — blocked users can't even reach the access-request flow
 - **Admin self-protection** — `/revoke` and `/block` refuse on admin chat_ids
+- **Heartbeat-driven self-heal** — bot writes `~/bot/.heartbeat` every 60s; launchd watchdog auto-restarts on crash or hang within ~2-3 min (ADR-022, ADR-025)
+- **Restart attribution** — every watchdog-driven restart DMs admins identifying who triggered it (`crashed`, `HTTP /restart from <source>`, `Telegram /restart by @user`, `hung`) and that the resume-builder watchdog is the respawner
+- **Graceful port release** — `stopHealthServer` awaits `closeAllConnections` + `close` before `process.exit`, so port 8787 is fully released and the next launch never EADDRINUSEs
 
 ---
 

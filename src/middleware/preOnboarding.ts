@@ -6,10 +6,12 @@ import { STRINGS } from '../strings.js'
 const ONBOARDING_COMMANDS = new Set([
   'start',
   'help',
+  'commands',
   'confirm',
   'reupload',
   'reonboard',
   'context',
+  'restart',
 ])
 
 // §13.9 edge case: "Non-file message before onboarded=1 → resend onboarding prompt."

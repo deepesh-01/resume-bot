@@ -5,13 +5,32 @@
 #
 # Designed to be run by launchd every 2 minutes (see install-watchdog.sh).
 # Exit codes are not meaningful for launchd's StartInterval driver.
+#
+# Deployment notes (ADR-025):
+#   - This script is COPIED to ~/bot/bin/watchdog.sh by install-watchdog.sh
+#     and launchd executes that copy. The repo copy here is the source of
+#     truth; reinstall after editing it.
+#   - The copy lives outside ~/Documents to sidestep macOS TCC, which
+#     blocks launchd-spawned bash from reading scripts under ~/Documents.
+#   - Config (token + admin chat ids) is read from ~/bot/.watchdog.env,
+#     also written by install-watchdog.sh, so the script never has to
+#     touch ~/Documents at runtime.
+#   - Detection is heartbeat-first: if ~/bot/.heartbeat is fresh, the bot
+#     is alive — we don't run pgrep/lsof at all. lsof-on-other-processes
+#     is unreliable under launchd's sandbox; relying on it produced
+#     false-positive "no bot process" restarts.
 
 set -uo pipefail
 
-REPO_ROOT="$HOME/Documents/resume-builder"
-HEARTBEAT_FILE="$HOME/bot/.heartbeat"
+REPO_ROOT="$HOME/Documents/resume-builder"   # used only for `cd && npm start`
+BOT_ROOT="$HOME/bot"
+HEARTBEAT_FILE="$BOT_ROOT/.heartbeat"
+BOT_PID_FILE="$BOT_ROOT/.bot.pid"
+RESTART_REASON_FILE="$BOT_ROOT/.restart-reason"
+WATCHDOG_ENV_FILE="$BOT_ROOT/.watchdog.env"
 HEARTBEAT_STALE_SECONDS=180   # 3 min — heartbeat ticks every 60s
-LOG_FILE="$HOME/bot/logs/watchdog.log"
+LOG_FILE="$BOT_ROOT/logs/watchdog.log"
+WATCHDOG_NAME="resume-builder watchdog"
 
 # fnm's "default" alias is a stable path to whichever node version is current.
 NODE_BIN_DIR="$HOME/.local/share/fnm/aliases/default/bin"
@@ -24,17 +43,19 @@ log() {
 }
 
 # notify_admin <message> — DMs every ADMIN_CHAT_IDS via the bot's own token.
-# Silent on failure; this is best-effort alerting.
+# Silent on failure; this is best-effort alerting. Token + chat ids are read
+# from ~/bot/.watchdog.env (written by install-watchdog.sh), so the watchdog
+# never has to read the repo's .env at runtime.
 notify_admin() {
   local message="$1"
-  local env_file="$REPO_ROOT/.env"
-  [ -f "$env_file" ] || return 0
+  [ -f "$WATCHDOG_ENV_FILE" ] || { log "notify_admin: $WATCHDOG_ENV_FILE missing"; return 0; }
 
-  local token
-  local admin_ids
-  token=$(grep -E '^TELEGRAM_BOT_TOKEN=' "$env_file" | cut -d= -f2-)
-  admin_ids=$(grep -E '^ADMIN_CHAT_IDS=' "$env_file" | cut -d= -f2-)
-  [ -n "$token" ] && [ -n "$admin_ids" ] || return 0
+  local token admin_ids
+  # shellcheck disable=SC1090
+  . "$WATCHDOG_ENV_FILE"
+  token="${TELEGRAM_BOT_TOKEN:-}"
+  admin_ids="${ADMIN_CHAT_IDS:-}"
+  [ -n "$token" ] && [ -n "$admin_ids" ] || { log "notify_admin: token or admin_ids empty"; return 0; }
 
   IFS=',' read -ra ids <<< "$admin_ids"
   for id in "${ids[@]}"; do
@@ -48,15 +69,20 @@ notify_admin() {
   done
 }
 
-# Match exact "node dist/index.js" (anchored at end of cmdline) so we don't
-# false-match unrelated processes. Use cwd to scope to this repo.
-find_bot_pids() {
-  pgrep -f "node dist/index\.js$" 2>/dev/null | while read -r pid; do
-    pcwd=$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | awk '/^n/ {print substr($0, 2)}' | head -1)
-    if [ "$pcwd" = "$REPO_ROOT" ]; then
+# Authoritative pid lookup. The bot writes its pid to $BOT_PID_FILE on
+# startup; we trust that file. We DO NOT fall back to "all pgrep matches"
+# — that path got us into trouble before, killing an unrelated `node
+# dist/index.js` from a sibling project.
+find_bot_pid() {
+  if [ -f "$BOT_PID_FILE" ]; then
+    local pid
+    pid=$(cat "$BOT_PID_FILE" 2>/dev/null | tr -dc '0-9')
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
       echo "$pid"
+      return 0
     fi
-  done
+  fi
+  return 1
 }
 
 start_bot() {
@@ -64,60 +90,84 @@ start_bot() {
   # Use & + nohup so the child detaches from this script's process group.
   nohup npm start >> "$LOG_FILE" 2>&1 &
   disown 2>/dev/null || true
-  sleep 4
-  log "started; new pids: $(find_bot_pids | tr '\n' ' ')"
+  sleep 5
+  log "started; new pid: $(find_bot_pid 2>/dev/null || echo unknown)"
 }
 
 kill_bot() {
-  local pids="$1"
-  log "stopping pids: $pids"
-  echo "$pids" | xargs kill -INT 2>/dev/null || true
+  local pid="$1"
+  log "stopping pid: $pid"
+  kill -INT "$pid" 2>/dev/null || true
   sleep 5
-  # Force-kill anything that didn't go down gracefully.
-  for p in $pids; do
-    if ps -p "$p" > /dev/null 2>&1; then
-      log "force-killing $p"
-      kill -KILL "$p" 2>/dev/null || true
-    fi
-  done
+  if ps -p "$pid" > /dev/null 2>&1; then
+    log "force-killing $pid"
+    kill -KILL "$pid" 2>/dev/null || true
+  fi
   sleep 1
+  # Wipe the stale pid file so the next find_bot_pid reflects reality.
+  rm -f "$BOT_PID_FILE"
+}
+
+# read_and_clear_reason — returns content of $RESTART_REASON_FILE (if any)
+# and deletes the file. Empty output means no recorded reason.
+read_and_clear_reason() {
+  if [ -f "$RESTART_REASON_FILE" ]; then
+    local r
+    r=$(cat "$RESTART_REASON_FILE" 2>/dev/null | head -c 200 | tr -d '\r\n' || true)
+    rm -f "$RESTART_REASON_FILE" 2>/dev/null || true
+    echo "$r"
+  fi
 }
 
 # ----- run -----
-PIDS=$(find_bot_pids | tr '\n' ' ' | xargs)
+# Heartbeat-first: if the heartbeat file is fresh, the bot is alive. Don't
+# touch lsof, don't restart. This is the path that fires 99% of the time.
+if [ -f "$HEARTBEAT_FILE" ]; then
+  HEARTBEAT_TS=$(cat "$HEARTBEAT_FILE" 2>/dev/null || echo 0)
+  NOW_MS=$(($(date +%s) * 1000))
+  AGE_MS=$((NOW_MS - HEARTBEAT_TS))
+  THRESHOLD_MS=$((HEARTBEAT_STALE_SECONDS * 1000))
 
-if [ -z "$PIDS" ]; then
-  log "no bot process — starting"
+  if [ "$AGE_MS" -ge 0 ] && [ "$AGE_MS" -le "$THRESHOLD_MS" ]; then
+    # Healthy. Clean up any stale reason file (e.g., bot exited cleanly via
+    # /restart but a fresh process started before our tick — race cleanup).
+    [ -f "$RESTART_REASON_FILE" ] && rm -f "$RESTART_REASON_FILE"
+    # Log occasionally for visibility (every ~10 runs = 20 min).
+    RAND=$((RANDOM % 10))
+    if [ "$RAND" -eq 0 ]; then
+      log "ok (heartbeat_age=${AGE_MS}ms)"
+    fi
+    exit 0
+  fi
+fi
+
+# Either heartbeat missing (first boot / wiped) or stale (process hung,
+# crashed, or never wrote). Time to act.
+BOT_PID=$(find_bot_pid 2>/dev/null || true)
+
+if [ -z "$BOT_PID" ]; then
+  log "no bot pid (file missing or pid dead) — starting"
   start_bot
-  notify_admin "🔄 Bot was down (no process running). Watchdog restarted it."
+  REASON=$(read_and_clear_reason)
+  if [ -n "$REASON" ]; then
+    notify_admin "🔄 Bot restarted: ${REASON} · respawned by ${WATCHDOG_NAME} · $(date '+%H:%M %Z')"
+  else
+    notify_admin "⚠️ Bot crashed (no process running) · respawned by ${WATCHDOG_NAME} · $(date '+%H:%M %Z')"
+  fi
   exit 0
 fi
 
-# Heartbeat freshness check.
+# Bot pid is alive but heartbeat is stale or missing — bot is hung.
 if [ ! -f "$HEARTBEAT_FILE" ]; then
-  log "heartbeat missing (pids: $PIDS) — restarting"
-  kill_bot "$PIDS"
+  log "heartbeat missing (pid: $BOT_PID) — restarting"
+  kill_bot "$BOT_PID"
   start_bot
-  notify_admin "🔄 Bot was running but heartbeat file was missing. Watchdog killed and restarted (was likely hung mid-startup)."
+  notify_admin "🔄 Bot was running but heartbeat file was missing (likely hung mid-startup) · killed + restarted by ${WATCHDOG_NAME} · $(date '+%H:%M %Z')"
   exit 0
 fi
 
-HEARTBEAT_TS=$(cat "$HEARTBEAT_FILE" 2>/dev/null || echo 0)
-NOW_MS=$(($(date +%s) * 1000))
-AGE_MS=$((NOW_MS - HEARTBEAT_TS))
-THRESHOLD_MS=$((HEARTBEAT_STALE_SECONDS * 1000))
-
-if [ "$AGE_MS" -gt "$THRESHOLD_MS" ]; then
-  AGE_S=$((AGE_MS / 1000))
-  log "heartbeat stale (age=${AGE_MS}ms, threshold=${THRESHOLD_MS}ms, pids: $PIDS) — restarting"
-  kill_bot "$PIDS"
-  start_bot
-  notify_admin "🔄 Bot was hung (heartbeat ${AGE_S}s stale, threshold ${HEARTBEAT_STALE_SECONDS}s). Watchdog killed and restarted."
-  exit 0
-fi
-
-# All good — log occasionally for visibility (every ~10 runs = 20 min).
-RAND=$((RANDOM % 10))
-if [ "$RAND" -eq 0 ]; then
-  log "ok (pids: $PIDS, heartbeat_age=${AGE_MS}ms)"
-fi
+AGE_S=$((AGE_MS / 1000))
+log "heartbeat stale (age=${AGE_MS}ms, threshold=${THRESHOLD_MS}ms, pid: $BOT_PID) — restarting"
+kill_bot "$BOT_PID"
+start_bot
+notify_admin "🔄 Bot was hung (heartbeat ${AGE_S}s stale, threshold ${HEARTBEAT_STALE_SECONDS}s) · killed + restarted by ${WATCHDOG_NAME} · $(date '+%H:%M %Z')"

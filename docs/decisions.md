@@ -473,4 +473,43 @@ On-disk file at `jobDir/final.pdf` is unchanged — keeps internal addressing pr
 
 ---
 
+## ADR-025 · Watchdog hardened: pid file + heartbeat-first detection + relocation outside `~/Documents`
+**Date:** 2026-04-27 · **Status:** Accepted · **Supersedes parts of:** ADR-022
+
+**Context.** The Pattern B watchdog from ADR-022 went into production and immediately hit four failure modes:
+
+1. **macOS TCC blocked launchd from reading the script.** `~/Documents/` is gated by macOS's "Files & Folders" privacy. launchd-spawned `/bin/bash` got `Operation not permitted` when reading `scripts/watchdog.sh`. We could ask the user to grant Full Disk Access to `bash` via System Settings, but that's a per-machine manual step and a surprise for any new contributor.
+2. **`lsof`-based cwd matching was unreliable in launchd's sandbox.** The script disambiguated `pgrep -f "node dist/index.js$"` matches by checking each candidate's `cwd`. Under launchd, `lsof` returned nothing for processes with files open in `~/Documents/`, so the disambiguation collapsed.
+3. **Fall-back to "kill all pgrep matches" was actively dangerous.** When `lsof` failed for every candidate, the script killed every `node dist/index.js` it could see — including an unrelated `welog/relay` bot in a sibling directory. Discovered in smoke testing.
+4. **Generic DMs gave the user no signal about what triggered a restart.** ADR-022's DM said `🔄 Bot was down (no process running). Watchdog restarted it.` regardless of whether the bot crashed, was killed manually, was killed by `POST /restart` from a third-party uptime monitor, or asked itself to restart.
+
+The notify_admin loop was DM'ing every 2 minutes because all of (1)-(3) compounded: the script couldn't even execute, then when it did execute it misidentified the resume-bot as "down" because lsof was blocked, then it killed innocent processes, then it failed to spawn a new bot because the real one was holding port 8787, etc.
+
+**Decision.** Five interlocking changes:
+
+1. **Relocate the watchdog out of `~/Documents/`.** `install-watchdog.sh` now copies `scripts/watchdog.sh` → `~/bot/bin/watchdog.sh` and the relevant `.env` keys → `~/bot/.watchdog.env` (chmod 600). The plist points launchd at the deployed copy. `scripts/watchdog.sh` in the repo is the source of truth; reinstall after editing.
+2. **Bot writes a pid file as the authoritative identifier.** `src/heartbeat.ts` writes `~/bot/.bot.pid` synchronously on `startHeartbeat()` and removes it in `stopHeartbeat()` only if the recorded pid still matches `process.pid` (so a fast crash-and-restart doesn't wipe out the new process's claim). The watchdog reads that file and uses `kill -0` to check liveness. **No `pgrep`, no `lsof` in the disambiguation path.**
+3. **Heartbeat-first detection.** If `~/bot/.heartbeat` is fresh (≤180s), the watchdog exits 0 silently with no further checks. The pid-file lookup is reserved for the (rare) act-on-stale path.
+4. **No more "fall back to all pgrep matches".** If pid-file lookup fails, the watchdog spawns a fresh bot and trusts the new pid file going forward — it does NOT scan and kill every `node dist/index.js` on the box. Killing a sibling project's bot is not an acceptable failure mode.
+5. **Restart attribution via a free-form reason file.** `~/bot/.restart-reason` is written by anyone who wants to ask the bot to restart (currently `POST /restart` and the new Telegram `/restart` command). The watchdog reads + deletes the file post-respawn and DMs the recorded string. DM template is now `🔄 Bot restarted: <reason> · respawned by resume-builder watchdog · HH:MM TZ`. Three reason values ship today: `HTTP /restart from <X-Watchdog-Source>`, `Telegram /restart by @user`, and (no file) `⚠️ Bot crashed (no process running)` for unattributed exits.
+
+Also rolled in: `stopHealthServer` is now `async` and awaits `server.closeAllConnections()` + `server.close()` before `process.exit`, so port 8787 is fully released on graceful shutdown and the next bot launch never EADDRINUSEs. The `/restart` HTTP handler and the new `/restart` Telegram handler both `process.kill(SIGINT)` so they go through the same shutdown path rather than `process.exit` directly.
+
+**Reasoning.**
+- (1) is the cheap fix for the TCC issue. Granting `bash` Full Disk Access works but is a hidden trap for any reinstall. Moving the script out of `~/Documents/` is permanent and self-documenting.
+- (2) is the right shape regardless of TCC: **a process should be identifiable by something it itself wrote, not by us heuristically introspecting kernel state.** A pid file is the simplest such identifier and it's authoritative.
+- (3) means the watchdog has zero overhead in the steady state — no `lsof`, no `pgrep`, just a stat on the heartbeat file and a math check. Both a performance win and a correctness win (fewer code paths that can misbehave).
+- (4) is a hard rule: **the watchdog must never kill a process it can't positively identify.** The cost of a missed restart is one extra cycle of the 2-min watchdog tick. The cost of killing a sibling project's bot is real data loss for a user who doesn't even know this watchdog exists.
+- (5) addresses the "who triggered this" question that surfaced as soon as `POST /restart` and a Telegram `/restart` command shipped. A free-form reason string is more flexible than a typed enum: any new caller (a future shell script, a Healthchecks.io webhook, a dashboard button) can write its own attribution without a code change in the watchdog.
+
+**Consequence.**
+- New runtime files in `~/bot/`: `bin/watchdog.sh` (copy of repo script), `.watchdog.env` (chmod 600 — token + admin chat ids), `.bot.pid` (current bot's pid), `.restart-reason` (transient).
+- New module exports in `src/heartbeat.ts`: `BOT_PID_FILE`, `RESTART_REASON_FILE`.
+- Existing watchdog DM template changed; admins who memorised the old wording will see the new format starting next restart.
+- The "macOS TCC gotcha" troubleshooting block in `how-to-journey.md` was removed — relocation makes it irrelevant.
+- A future cross-repo restart-log contract (sibling projects writing to a shared `~/bot/logs/restarts.log`) is **not** introduced here; if needed, a separate ADR will define the schema.
+- New Telegram command `/restart` (admin-only) and `/commands` (public, tappable list). `setMyCommands` is called on bot boot to populate Telegram's autocomplete menu — public scope by default, admin commands additionally registered per `ADMIN_CHAT_IDS` chat.
+
+---
+
 *New decisions append below this line.*

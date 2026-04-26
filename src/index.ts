@@ -22,7 +22,10 @@ import { contextHandler } from './handlers/context.js'
 import { statusHandler } from './handlers/status.js'
 import { resetHandler } from './handlers/reset.js'
 import { helpHandler } from './handlers/help.js'
+import { commandsHandler } from './handlers/commands.js'
+import { restartHandler } from './handlers/restart.js'
 import { callbackRouter } from './handlers/callbacks.js'
+import { PUBLIC_COMMAND_MENU, ADMIN_COMMAND_MENU } from './menus.js'
 import {
   pendingHandler,
   allowHandler,
@@ -37,6 +40,7 @@ bot.use(allowlist)
 bot.use(preOnboarding)
 bot.command('start', startHandler)
 bot.command('help', helpHandler)
+bot.command('commands', commandsHandler)
 bot.command('confirm', confirmHandler)
 bot.command('reupload', reuploadHandler)
 bot.command('reonboard', reonboardHandler)
@@ -55,6 +59,7 @@ bot.command('users', usersHandler)
 bot.command('revoke', revokeHandler)
 bot.command('block', blockHandler)
 bot.command('unblock', unblockHandler)
+bot.command('restart', restartHandler)
 bot.on('callback_query:data', callbackRouter)
 bot.on('message:document', documentHandler)
 bot.on('message:text', jobMessageHandler)
@@ -64,7 +69,9 @@ const shutdown = async (signal: string): Promise<void> => {
   if (shuttingDown) return
   shuttingDown = true
   logger.info({ event: 'shutdown', signal }, 'shutting down')
-  stopHealthServer()
+  // Await health server close so port 8787 is fully released before exit;
+  // otherwise the next bot launch races with kernel socket teardown.
+  await stopHealthServer()
   stopHeartbeat()
   stopArchiveCron()
   try {
@@ -79,9 +86,38 @@ const shutdown = async (signal: string): Promise<void> => {
 process.once('SIGINT', () => void shutdown('SIGINT'))
 process.once('SIGTERM', () => void shutdown('SIGTERM'))
 
+// Register Telegram autocomplete menus. Default scope is public commands;
+// each admin chat additionally gets the admin commands. Best-effort —
+// failure here doesn't block bot start.
+const registerCommandMenus = async (): Promise<void> => {
+  try {
+    await bot.api.setMyCommands([...PUBLIC_COMMAND_MENU], {
+      scope: { type: 'default' },
+    })
+    for (const adminChatId of config.ADMIN_CHAT_IDS) {
+      await bot.api.setMyCommands(
+        [...PUBLIC_COMMAND_MENU, ...ADMIN_COMMAND_MENU],
+        { scope: { type: 'chat', chat_id: adminChatId } },
+      )
+    }
+    logger.info(
+      {
+        event: 'commands_registered',
+        public_count: PUBLIC_COMMAND_MENU.length,
+        admin_count: ADMIN_COMMAND_MENU.length,
+        admin_chats: config.ADMIN_CHAT_IDS.length,
+      },
+      'Telegram command autocomplete registered',
+    )
+  } catch (err) {
+    logger.warn({ err: String(err) }, 'setMyCommands failed')
+  }
+}
+
 startArchiveCron()
 startHeartbeat()
 startHealthServer()
+void registerCommandMenus()
 
 bot.start({
   onStart: () => {

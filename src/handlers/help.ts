@@ -13,6 +13,7 @@ const HELP =
   `\n` +
   `<b>Commands</b>\n` +
   `/start — onboarding (upload base resume)\n` +
+  `/commands — tappable list of available commands\n` +
   `/confirm — accept extracted resume during onboarding\n` +
   `/reupload — replace your base resume (keeps context.md and history)\n` +
   `/reonboard — full reset: clears base resume, context.md, archives active jobs\n` +

@@ -13,7 +13,7 @@ import http from 'node:http'
 import fs from 'node:fs/promises'
 import { config } from './config.js'
 import { logger } from './logger.js'
-import { HEARTBEAT_FILE } from './heartbeat.js'
+import { HEARTBEAT_FILE, RESTART_REASON_FILE } from './heartbeat.js'
 
 const HEALTH_HOST = '127.0.0.1'
 const HEARTBEAT_STALE_MS = 180_000
@@ -83,13 +83,39 @@ export const startHealthServer = (): void => {
         writeJson(res, 401, { ok: false, error: 'invalid or missing token' })
         return
       }
+      // Caller identifies itself via X-Watchdog-Source so the watchdog
+      // can attribute the DM after respawn. Sanitize to a single line.
+      const rawSource = req.headers['x-watchdog-source']
+      const source = (
+        typeof rawSource === 'string' ? rawSource : (rawSource?.[0] ?? '')
+      )
+        .replace(/[\r\n]+/g, ' ')
+        .trim()
+        .slice(0, 80)
+      const sourceLabel = source || 'unknown external service'
+      try {
+        await fs.writeFile(
+          RESTART_REASON_FILE,
+          `HTTP /restart from ${sourceLabel}`,
+        )
+      } catch (err) {
+        logger.warn(
+          { err: String(err), file: RESTART_REASON_FILE },
+          'failed to write restart-reason file',
+        )
+      }
       logger.warn(
-        { event: 'remote_restart_requested', remote: req.socket.remoteAddress },
+        {
+          event: 'remote_restart_requested',
+          remote: req.socket.remoteAddress,
+          source: sourceLabel,
+        },
         'remote restart triggered via /restart',
       )
       writeJson(res, 202, { ok: true, restarting: true, exit_in_ms: 500 })
-      // Give the response time to flush; then exit. Watchdog respawns.
-      setTimeout(() => process.exit(1), 500).unref?.()
+      // Give the response time to flush, then trigger the SIGINT shutdown
+      // path so stopHealthServer() runs and port 8787 is released cleanly.
+      setTimeout(() => process.kill(process.pid, 'SIGINT'), 500).unref?.()
       return
     }
 
@@ -104,9 +130,18 @@ export const startHealthServer = (): void => {
   })
 }
 
-export const stopHealthServer = (): void => {
-  if (server) {
-    server.close()
-    server = undefined
+export const stopHealthServer = async (): Promise<void> => {
+  if (!server) return
+  const s = server
+  server = undefined
+  // closeAllConnections (Node 18+) drops keep-alive sockets immediately so
+  // server.close() can resolve. Without it, the close callback waits on
+  // idle keep-alive connections and our subsequent process.exit() leaves
+  // the port in a held state — the next bot then crashes with EADDRINUSE.
+  if (typeof s.closeAllConnections === 'function') {
+    s.closeAllConnections()
   }
+  await new Promise<void>((resolve) => {
+    s.close(() => resolve())
+  })
 }

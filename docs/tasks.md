@@ -1143,3 +1143,47 @@ If quality lifts noticeably, no need for lever (c). If it doesn't move (or moves
 - [ ] H1-less base resume → falls back to `{jobId}.pdf`.
 - [ ] Multiple jobs from the same chat → distinct filenames, no overwrite when user saves.
 - [ ] Edits via `runEditFlow` use the SAME naming (job_row's role/company).
+
+---
+
+# Build Step Watchdog-Hardening — pid file, attribution, /restart, /commands, autocomplete (ADR-025)
+
+*ADR-022's watchdog hit four failure modes in production: macOS TCC blocked the launchd-spawned bash from reading scripts under `~/Documents/`; `lsof` cwd-disambiguation failed inside the launchd sandbox; the "fall back to all pgrep matches" path killed an unrelated `welog/relay` bot in a sibling directory; and the DM didn't tell the user who triggered the restart. While fixing those, also add a `/restart` Telegram command, a tappable `/commands` list, autocomplete via `setMyCommands`, and a graceful port-8787 release on shutdown.*
+
+## WH.1 — Bot-side pid file + restart reason file (15 min)
+- `src/heartbeat.ts`: export `BOT_PID_FILE = ~/bot/.bot.pid` and `RESTART_REASON_FILE = ~/bot/.restart-reason`.
+- `startHeartbeat()`: write `process.pid` to `BOT_PID_FILE` synchronously before scheduling the tick.
+- `stopHeartbeat()`: only `unlink` the file if the recorded pid matches `process.pid` (so a fast crash-and-restart doesn't wipe the new claim).
+
+## WH.2 — Async stopHealthServer + SIGINT-based /restart (10 min)
+- `src/health.ts`: `stopHealthServer` becomes `async`. Calls `server.closeAllConnections()` (Node 18+) then awaits `server.close()`. Without this the next bot launch hits EADDRINUSE on 8787.
+- `src/index.ts` shutdown handler awaits `stopHealthServer()` before `process.exit`.
+- `/restart` HTTP and the new `/restart` Telegram handler both write `RESTART_REASON_FILE` then `process.kill(process.pid, 'SIGINT')` so they go through the same graceful shutdown path. No more bare `process.exit(1)`.
+
+## WH.3 — `/restart` Telegram command (10 min)
+- `src/handlers/restart.ts`: admin-only via `isAdmin`. Reason string `Telegram /restart by @<username|chat_id>`.
+- Register in `src/index.ts`. Add `restart` to `ONBOARDING_COMMANDS` in `src/middleware/preOnboarding.ts` so admins aren't blocked from restarting if their onboarding state is somehow off.
+
+## WH.4 — `/commands` Telegram command + autocomplete via setMyCommands (15 min)
+- New `src/menus.ts`: single source of truth for `PUBLIC_COMMAND_MENU` and `ADMIN_COMMAND_MENU` (each entry = `{command, description}`).
+- New `src/handlers/commands.ts`: replies with a tappable list of `/commands`. Includes admin commands when `isAdmin(ctx.from?.id)`. No descriptions in the reply (that's `/help`'s job).
+- `src/index.ts`: at boot, `bot.api.setMyCommands(PUBLIC_COMMAND_MENU, { scope: { type: 'default' } })`, then for each `ADMIN_CHAT_ID`, `bot.api.setMyCommands([...PUBLIC, ...ADMIN], { scope: { type: 'chat', chat_id: id } })`. Wrapped in try/catch — failure here doesn't block bot start.
+
+## WH.5 — Watchdog rewrite (20 min)
+- `scripts/watchdog.sh`: heartbeat-first detection. If heartbeat fresh → exit 0 silently with ~10% sample logging. If stale → look up bot via `~/bot/.bot.pid` (NOT `pgrep`/`lsof`). If pid alive → SIGINT → wait → SIGKILL → start. If pid dead/missing → just start. After respawn: read + delete `RESTART_REASON_FILE`, DM the recorded reason or `⚠️ Bot crashed (no process running)` if absent.
+- DM template: `🔄 Bot restarted: <reason> · respawned by resume-builder watchdog · HH:MM TZ`. Hung path: `🔄 Bot was hung (heartbeat Xs stale, threshold 180s) · killed + restarted by resume-builder watchdog · …`.
+- Reads config from `~/bot/.watchdog.env` (NOT `$REPO_ROOT/.env` — see WH.6).
+
+## WH.6 — `install-watchdog.sh` deploys outside `~/Documents/` (10 min)
+- Copies `scripts/watchdog.sh` → `~/bot/bin/watchdog.sh` (chmod 755).
+- Extracts `TELEGRAM_BOT_TOKEN` + `ADMIN_CHAT_IDS` from `.env` → `~/bot/.watchdog.env` (chmod 600).
+- Plist's `ProgramArguments[1]` updated to `/Users/deepeshz2/bot/bin/watchdog.sh`.
+- `uninstall-watchdog.sh` removes the deployed script + env file.
+
+## WH.7 — Smoke checklist
+- [ ] `kill -9 $(cat ~/bot/.bot.pid)` → `~/bot/logs/watchdog.log` shows `no bot pid (file missing or pid dead) — starting`, fresh pid in `~/bot/.bot.pid`, DM arrives `⚠️ Bot crashed (no process running) · respawned by resume-builder watchdog · …`. Sibling `node dist/index.js` processes from other repos are **not** killed.
+- [ ] `curl -X POST -H "X-Watchdog-Token: $TOKEN" -H "X-Watchdog-Source: smoke-test-http" http://127.0.0.1:8787/restart` → bot exits gracefully (port 8787 fully released, `lsof -tiTCP:8787` shows nothing), `~/bot/.restart-reason` says `HTTP /restart from smoke-test-http`, watchdog respawns and DM says `🔄 Bot restarted: HTTP /restart from smoke-test-http · respawned by resume-builder watchdog · …`.
+- [ ] Send `/restart` from Telegram as an admin → bot replies `♻️ Restarting now…`, exits gracefully, watchdog respawns and DM says `🔄 Bot restarted: Telegram /restart by @<you> · respawned by resume-builder watchdog · …`.
+- [ ] Send `/commands` from Telegram → reply is a list of `/start /help /commands …` lines (tappable). As admin, also includes the `— admin —` block ending in `/restart`.
+- [ ] In Telegram client: type `/` and verify autocomplete pops up the command list. Public chats see public-only; admin chats also see admin commands.
+- [ ] `launchctl print "gui/$(id -u)/com.deepesh.resume-bot-watchdog" | grep "last exit"` shows `last exit code = 0`. `~/bot/logs/watchdog.stderr.log` has no new `Operation not permitted` lines after install.
