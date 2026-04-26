@@ -12,6 +12,7 @@ import {
   ClaudeError,
 } from './claude.js'
 import { renderResumePdf, RenderError } from './render.js'
+import { buildPdfFilename, getCandidateName } from './pdfName.js'
 import {
   createJob,
   setJobStatus,
@@ -250,7 +251,14 @@ export const runJob = async (
       const pdfPath = await renderResumePdf(jobDir)
       ctx.logger.info({ event: 'render_ok', job_id: jobId, pdf: pdfPath }, 'rendered')
 
-      await ctx.replyWithDocument(new InputFile(pdfPath), {
+      const candidate = await getCandidateName(chatId)
+      const downloadName = buildPdfFilename({
+        candidate,
+        role: role ?? null,
+        company: company ?? null,
+        jobId,
+      })
+      await ctx.replyWithDocument(new InputFile(pdfPath, downloadName), {
         caption: STRINGS.v1Ready(summary, scoreNote),
       })
 
