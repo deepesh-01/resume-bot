@@ -415,4 +415,62 @@ A simple `pgrep` health check catches (1) but not (2). And without an external w
 
 ---
 
+## ADR-023 · External-trigger HTTP endpoints (`/healthz`, `/restart`)
+**Date:** 2026-04-27 · **Status:** Accepted
+
+**Context.** The launchd watchdog (ADR-022) lives on the same laptop as the bot. If the laptop is up but a third-party monitor (UptimeRobot, Healthchecks.io, custom) is what's checking liveness, that monitor needs:
+1. A way to ASK whether the bot is alive (not just "did it ping me recently").
+2. A way to TRIGGER a restart when it detects a hang, without SSH'ing or walking to the laptop.
+
+**Decision.** Bot exposes a small HTTP server on `127.0.0.1:8787` (configurable via `HEALTH_PORT`):
+
+- `GET /healthz` — no auth. Returns `200 {ok:true, heartbeat_age_ms, threshold_ms}` if the heartbeat file is younger than 180s. Returns `503 {ok:false, ...}` otherwise.
+- `POST /restart` — requires `X-Watchdog-Token: <WATCHDOG_RESTART_TOKEN>` header. If token is configured AND matches: responds `202 {ok:true, restarting:true}`, then `process.exit(1)` after 500ms. Watchdog respawns within 2 min. If token is unset, returns `501`. If token is wrong, returns `401`.
+
+Bound to `127.0.0.1` so the endpoints aren't reachable across the network. Users who want external access expose them via Cloudflare Tunnel / ngrok / SSH tunnel. The token requirement on `/restart` defends against accidental triggers if the tunnel is misconfigured.
+
+**Reasoning.**
+- A pure heartbeat-file approach (ADR-022) is opaque to external services. They'd need filesystem access to read the heartbeat. HTTP is the universal interface.
+- Separation of concerns: `/healthz` lets ANY tool ping for liveness; `/restart` is privileged.
+- 127.0.0.1-binding is a meaningful default — exposing it externally must be deliberate.
+- Token in env (not hardcoded), generated via `openssl rand -hex 32`. Empty token disables `/restart` entirely.
+- Not extending the Telegram bot itself for this — when bot is hung, Telegram is unreachable through it. HTTP is independent of the polling loop.
+
+**Consequence.**
+- Two new env keys: `HEALTH_PORT` (default 8787, set to 0 to disable the server), `WATCHDOG_RESTART_TOKEN` (default empty = restart disabled).
+- A future Cloudflare Tunnel config (per-user setup, not committed) can map a subdomain to localhost:8787.
+- Local dev: `curl http://127.0.0.1:8787/healthz` works from the same machine; `curl -X POST -H "X-Watchdog-Token: ..." http://127.0.0.1:8787/restart` triggers restart for testing.
+- The launchd watchdog (ADR-022) and this HTTP endpoint complement each other: launchd is the local self-healer; HTTP is the third-party-trigger interface.
+
+---
+
+## ADR-024 · Descriptive PDF filenames (vs `final.pdf`)
+**Date:** 2026-04-27 · **Status:** Accepted
+
+**Context.** Tailored resumes were sent through Telegram with the on-disk filename `final.pdf`. Users (notably during friend testing) flagged two real problems:
+
+1. Saving multiple resumes from the bot all collide: `final.pdf` overwrites the previous one in the user's downloads folder.
+2. The name is generic and unhelpful — months later, the user can't tell from the filename which resume was for which role.
+
+**Decision.** Telegram-side filename: `{First}_{Last}_{Role}_{Company}.pdf`. Built per-job:
+- First/last name parsed from the H1 of `base_resume.md` (`# DEEPESH RATHOD` → `Deepesh`/`Rathod`).
+- Role and company come from the job row (extracted at scrape time, or null if pasted-text JD).
+- All parts sanitized: `[^A-Za-z0-9_-]+ → _`, collapsed underscores, trimmed, max 40 chars per segment.
+- Fallback to `{job_id}.pdf` if name parts can't be resolved (e.g., manual paste with no extracted role/company AND base resume H1 missing).
+
+On-disk file at `jobDir/final.pdf` is unchanged — keeps internal addressing predictable and matches existing render/copy/test code paths. The override happens only at the `new InputFile(path, filename)` call.
+
+**Reasoning.**
+- The disk filename and the wire filename serve different audiences. Internal: predictable. User-facing: descriptive.
+- Pulling from base_resume.md keeps it dynamic — when the user changes their resume name, future tailorings reflect it.
+- Sanitization is conservative (alphanumeric + underscore + dash) to play nicely with macOS, Linux, Windows, and Telegram's UI.
+- Fallback to job_id ensures Telegram never sees an empty or weird filename.
+
+**Consequence.**
+- New module `src/pdfName.ts` with `getCandidateName(chat_id)` and `buildPdfFilename({candidate, role, company, jobId})`.
+- Used in both `runJob.ts` (initial v1 send) and `runEdit.ts` (post-edit re-render send).
+- ADR-021's `cli-tailor` continues to write to `final.pdf` on disk; if a future caller wants the descriptive name, it can call `buildPdfFilename` itself.
+
+---
+
 *New decisions append below this line.*

@@ -36,5 +36,14 @@ echo
 echo "Tail watchdog activity:"
 echo "  tail -f ~/bot/logs/watchdog.log"
 echo
+echo "⚠️  macOS PERMISSION NOTE"
+echo "   If watchdog.stderr.log shows 'Operation not permitted', launchd is being"
+echo "   blocked from reading scripts in ~/Documents/."
+echo "   Fix: System Settings → Privacy & Security → Full Disk Access"
+echo "   → Click + → Cmd+Shift+G → type /bin/bash → add it. Then re-run this script."
+echo
+echo "   Verify with: launchctl print gui/\$(id -u)/${LABEL} | grep 'last exit'"
+echo "   Healthy: 'last exit code = 0'. Blocked: 'last exit code = 126'."
+echo
 echo "Uninstall:"
 echo "  bash scripts/uninstall-watchdog.sh"

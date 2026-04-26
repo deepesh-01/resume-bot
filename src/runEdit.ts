@@ -5,6 +5,7 @@ import type { BotContext } from './bot.js'
 import { withUserLock } from './mutex.js'
 import { runEdit as runClaudeEdit, ClaudeError } from './claude.js'
 import { renderResumePdf, RenderError } from './render.js'
+import { buildPdfFilename, getCandidateName } from './pdfName.js'
 import {
   getActiveJob,
   setJobSession,
@@ -94,7 +95,14 @@ export const runEditFlow = async (
         'edit complete',
       )
 
-      await ctx.replyWithDocument(new InputFile(pdfPath), {
+      const candidate = await getCandidateName(chatId)
+      const downloadName = buildPdfFilename({
+        candidate,
+        role: job.role,
+        company: job.company,
+        jobId: job.job_id,
+      })
+      await ctx.replyWithDocument(new InputFile(pdfPath, downloadName), {
         caption: STRINGS.editComplete(summary),
       })
     } catch (err) {

@@ -1084,3 +1084,62 @@ If quality lifts noticeably, no need for lever (c). If it doesn't move (or moves
 - External dead-man's-switch for laptop-off scenarios (Healthchecks.io ping; would be a separate ADR if implemented).
 - Watchdog self-monitoring (if launchd itself is unhealthy, no recovery).
 - Per-restart cool-down to prevent thrashing if bot crashes repeatedly (current: restart every 2 min indefinitely).
+
+---
+
+# Build Step External-Trigger — `/healthz` + `/restart` HTTP endpoints (ADR-023)
+
+*Third-party uptime monitors (UptimeRobot, Healthchecks.io, custom) need an HTTP API to ASK liveness and TRIGGER restart on hang detection. The launchd watchdog (W.*) is the local self-healer; this is the third-party-trigger interface.*
+
+## ET.1 — env keys (5 min)
+- `.env.example` adds `HEALTH_PORT=8787` (default) and `WATCHDOG_RESTART_TOKEN=` (empty = disabled).
+- `src/config.ts` parses both with sane defaults (port 8787, token empty string).
+
+## ET.2 — `src/health.ts` (30 min)
+- Plain `node:http` server bound to `127.0.0.1:HEALTH_PORT`.
+- `GET /healthz`: reads `~/bot/.heartbeat` age. 200 + JSON if <180s, 503 + JSON otherwise.
+- `POST /restart`: validates `X-Watchdog-Token` header against `WATCHDOG_RESTART_TOKEN`. 401 if invalid, 501 if token unset, 202 + scheduled `process.exit(1)` after 500ms if valid.
+- `startHealthServer()`/`stopHealthServer()` exported.
+- Graceful: if HEALTH_PORT=0, skip server entirely.
+
+## ET.3 — Wire into `src/index.ts` (5 min)
+- Import + call `startHealthServer()` after `startHeartbeat()`, before `bot.start()`.
+- `stopHealthServer()` in shutdown handler.
+
+## ET.4 — Smoke checklist
+- [ ] `curl http://127.0.0.1:8787/healthz` → 200 with `heartbeat_age_ms < 60000`.
+- [ ] Touch heartbeat to old: `echo 0 > ~/bot/.heartbeat` → `curl /healthz` → 503.
+- [ ] `curl -X POST /restart` → 401 (no token).
+- [ ] `curl -X POST -H "X-Watchdog-Token: wrong" /restart` → 401.
+- [ ] `curl -X POST -H "X-Watchdog-Token: $TOKEN" /restart` → 202, bot exits within 1s.
+- [ ] launchd watchdog (or `bash scripts/watchdog.sh`) respawns the bot within 2 min.
+- [ ] Set `HEALTH_PORT=0` and restart → no HTTP server starts; `/healthz` connection refused.
+- [ ] Set `WATCHDOG_RESTART_TOKEN=` (empty) → `/restart` returns 501 even with valid-looking header.
+
+## ET.5 — Out of scope
+- Tunneling setup (Cloudflare Tunnel / ngrok) — documented in how-to-journey.md, user-managed.
+- Webhook integration with specific monitors (Healthchecks.io, UptimeRobot) — pluggable per user.
+- Rate limiting on `/restart` (currently no throttle; trust the token).
+
+---
+
+# Build Step Filename — Descriptive PDF filenames (ADR-024)
+
+*`final.pdf` is generic and overrides previously-saved files. Friend feedback during testing.*
+
+## FN.1 — `src/pdfName.ts` (15 min)
+- `sanitize(s)`: `[^A-Za-z0-9_-] → _`, collapse, trim, max 40 chars per segment.
+- `getCandidateName(chat_id)`: parse `# <Name>` H1 from `base_resume.md`. Returns `{first, last}`. Empty strings if not parseable.
+- `buildPdfFilename({candidate, role, company, jobId})`: joins parts with `_`, falls back to `${jobId}.pdf` if fewer than 2 sanitized parts available.
+
+## FN.2 — Wire into runJob.ts + runEdit.ts (10 min)
+- Import + use `buildPdfFilename` to compute Telegram-side filename.
+- `new InputFile(pdfPath, downloadName)` instead of just `new InputFile(pdfPath)`.
+- On-disk path stays at `jobDir/final.pdf` (predictable for render + tests).
+
+## FN.3 — Smoke checklist
+- [ ] After a tailoring, the Telegram-attached PDF shows as `Deepesh_Rathod_Software_Engineer_2_Customer_Journey_Abnormal_AI.pdf` (or similar derived from base resume H1 + jobs.role + jobs.company).
+- [ ] Pasted-text JD with no role/company → falls back to `{jobId}.pdf`.
+- [ ] H1-less base resume → falls back to `{jobId}.pdf`.
+- [ ] Multiple jobs from the same chat → distinct filenames, no overwrite when user saves.
+- [ ] Edits via `runEditFlow` use the SAME naming (job_row's role/company).

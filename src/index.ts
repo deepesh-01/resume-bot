@@ -5,6 +5,7 @@ import { closeDb } from './db.js'
 import { bot } from './bot.js'
 import { startArchiveCron, stopArchiveCron } from './archiveCron.js'
 import { startHeartbeat, stopHeartbeat } from './heartbeat.js'
+import { startHealthServer, stopHealthServer } from './health.js'
 import { allowlist } from './middleware/allowlist.js'
 import { preOnboarding } from './middleware/preOnboarding.js'
 import { startHandler } from './handlers/start.js'
@@ -63,6 +64,7 @@ const shutdown = async (signal: string): Promise<void> => {
   if (shuttingDown) return
   shuttingDown = true
   logger.info({ event: 'shutdown', signal }, 'shutting down')
+  stopHealthServer()
   stopHeartbeat()
   stopArchiveCron()
   try {
@@ -79,6 +81,7 @@ process.once('SIGTERM', () => void shutdown('SIGTERM'))
 
 startArchiveCron()
 startHeartbeat()
+startHealthServer()
 
 bot.start({
   onStart: () => {

@@ -400,6 +400,38 @@ tail -f ~/bot/logs/watchdog.log
 
 **What it doesn't catch:** laptop entirely off. For that, add an external dead-man's-switch (e.g., Healthchecks.io ping every hour from the bot itself — see ADR-022 consequence).
 
+**macOS permission gotcha:** `~/Documents/` is gated by macOS's "Files & Folders" privacy. launchd-spawned bash gets `Operation not permitted` when it tries to read `scripts/watchdog.sh`. Fix once: System Settings → Privacy & Security → Full Disk Access → click + → Cmd+Shift+G → type `/bin/bash` → add it. Re-run `bash scripts/install-watchdog.sh`. Verify: `launchctl print "gui/$(id -u)/com.deepesh.resume-bot-watchdog" | grep "last exit"` should show `0`. If `126`, permission still missing.
+
+---
+
+## External trigger: HTTP endpoints (ADR-023)
+
+For third-party uptime monitors (UptimeRobot, BetterUptime, Healthchecks.io, custom) to check liveness AND trigger restart on hang, the bot exposes:
+
+- `GET http://127.0.0.1:8787/healthz` — no auth. 200 if heartbeat fresh, 503 if stale (>180s) or missing. JSON body includes `heartbeat_age_ms` so monitors can graph it.
+- `POST http://127.0.0.1:8787/restart` — requires `X-Watchdog-Token` header matching `WATCHDOG_RESTART_TOKEN` env. On match: 202 + bot exits → launchd watchdog respawns within 2 min.
+
+**Bound to 127.0.0.1 only.** Expose to the internet deliberately via:
+- **Cloudflare Tunnel** (recommended; persistent, free): `cloudflared tunnel --url http://127.0.0.1:8787`
+- **ngrok**: `ngrok http 8787`
+- **SSH reverse tunnel** to a VPS: `ssh -R 8787:localhost:8787 user@vps`
+
+**Generate a strong token:**
+```bash
+openssl rand -hex 32
+# add to .env: WATCHDOG_RESTART_TOKEN=<output>
+```
+Leaving it empty disables the `/restart` endpoint entirely (returns 501).
+
+**Test from same laptop:**
+```bash
+curl -s http://127.0.0.1:8787/healthz
+TOKEN=$(grep '^WATCHDOG_RESTART_TOKEN=' .env | cut -d= -f2-)
+curl -X POST -H "X-Watchdog-Token: $TOKEN" http://127.0.0.1:8787/restart
+```
+
+**Disable the HTTP server entirely:** set `HEALTH_PORT=0` in `.env`.
+
 ---
 
 ## Common failure modes

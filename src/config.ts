@@ -59,6 +59,15 @@ const parseQualityThreshold = (): number => {
   return Number.isFinite(n) && n >= 0 && n <= 100 ? n : 80
 }
 
+// Optional: HTTP health-check + restart endpoint port. 0 = disabled.
+// Default 8787, bound to 127.0.0.1.
+const parseHealthPort = (): number => {
+  const raw = process.env.HEALTH_PORT
+  if (!raw || raw.trim() === '') return 8787
+  const n = Number(raw)
+  return Number.isFinite(n) && n >= 0 && n <= 65535 ? n : 8787
+}
+
 export const config = {
   TELEGRAM_BOT_TOKEN: process.env.TELEGRAM_BOT_TOKEN!,
   ALLOWED_CHAT_IDS: parseChatIds(process.env.ALLOWED_CHAT_IDS!),
@@ -71,6 +80,9 @@ export const config = {
   PLAYWRIGHT_LINKEDIN_COOKIE_PATH: process.env.PLAYWRIGHT_LINKEDIN_COOKIE_PATH!,
   NODE_ENV: process.env.NODE_ENV!,
   QUALITY_THRESHOLD: parseQualityThreshold(),
+  HEALTH_PORT: parseHealthPort(),
+  // Optional: enables /restart endpoint when set. Empty/undefined disables it.
+  WATCHDOG_RESTART_TOKEN: process.env.WATCHDOG_RESTART_TOKEN ?? '',
 } as const
 
 export const isProd = config.NODE_ENV === 'production'
