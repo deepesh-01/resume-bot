@@ -127,9 +127,27 @@ export const usersHandler = async (ctx: BotContext): Promise<void> => {
   // One tappable "📊 …" button per allowed user → opens /userstatus for them.
   // 2 buttons per row keeps the keyboard readable on small screens. Blocked
   // users get the same drill-in (their history is still useful).
+  // Label preference: @username → display_name → chat_id. The point of the
+  // label is fast human ID, so the cryptic chat_id is the last fallback.
+  // Telegram caps button labels at ~64 chars; trim long display names.
+  const buttonLabel = (u: {
+    username: string | null
+    display_name: string | null
+    chat_id: number
+  }): string => {
+    if (u.username) return `📊 @${u.username}`
+    if (u.display_name) {
+      const name =
+        u.display_name.length > 50
+          ? `${u.display_name.slice(0, 47)}…`
+          : u.display_name
+      return `📊 ${name}`
+    }
+    return `📊 ${u.chat_id}`
+  }
   const allRows = [...allowed, ...blocked]
   const buttons = allRows.map((u) => ({
-    text: `📊 ${u.username ? `@${u.username}` : String(u.chat_id)}`,
+    text: buttonLabel(u),
     callback_data: `userstatus:${u.chat_id}`,
   }))
   const inline_keyboard: { text: string; callback_data: string }[][] = []
