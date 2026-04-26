@@ -143,6 +143,26 @@ This layering is **why split pastes work cleanly**: layer 5 opens a buffer; subs
 | `/block CHAT_ID [reason...]` | Same as revoke + adds to blocked_users + DM with the block notice |
 | `/unblock CHAT_ID` | Remove from blocked_users (does NOT re-grant; they need to /start again) |
 
+### Headless CLI (System B integration, ADR-021)
+
+Not a Telegram command — a separate entry point compiled to
+`dist/cli-tailor.js`. Used by the sibling `job-intake` project to
+produce a tailored resume PDF for a JD without going through Telegram.
+
+```sh
+node dist/cli-tailor.js \
+  --jd-path /path/to/job_description.md \
+  --chat-id 1089113785 \
+  [--output-dir /path/to/copy/pdf/to] \
+  --output-format json
+```
+
+Outputs one JSON line on stdout: `{ok, pdf_path, last_change, score,
+refinement_applied, duration_ms, error}`. Reuses the same tailoring +
+critic + refinement pipeline as the bot. Does not write to the SQLite
+DB. Per-job workspace lands in `~/bot/users/<chat_id>/jobs/<job_id>/`
+alongside bot-created jobs.
+
 ### Reply-to-prompt selections (no slash)
 
 - After `/save`: type `1 3 5`, `all`, or `none`
@@ -347,6 +367,38 @@ If the bot is offline, updates queue at Telegram. To inspect:
 curl -s "https://api.telegram.org/bot<TOKEN>/getUpdates?offset=-5" | python3 -m json.tool
 ```
 Note: this consumes updates if the bot isn't running. Don't run while bot is running.
+
+---
+
+## Self-healing: heartbeat + watchdog (ADR-022)
+
+The bot has two-part auto-recovery:
+
+**Heartbeat** — bot writes current epoch ms to `~/bot/.heartbeat` every 60s while running.
+
+**Watchdog** — `scripts/watchdog.sh` runs every 2 minutes via launchd:
+- If no bot process matching this repo's `cwd` exists → restart
+- If heartbeat file is older than 180s → kill stuck bot + restart
+- After any restart: DMs admin via Telegram with the reason
+
+**Install once:**
+```bash
+bash scripts/install-watchdog.sh
+```
+Loads `~/Library/LaunchAgents/com.deepesh.resume-bot-watchdog.plist`. Survives logout. Unload with `bash scripts/uninstall-watchdog.sh`.
+
+**Verify it's running:**
+```bash
+launchctl print "gui/$(id -u)/com.deepesh.resume-bot-watchdog" | grep state
+tail -f ~/bot/logs/watchdog.log
+```
+
+**What you'll see in your Telegram chat:**
+- Nothing during normal operation.
+- `🔄 Bot was hung (heartbeat 245s stale, threshold 180s). Watchdog killed and restarted.` when a hang is auto-recovered.
+- `🔄 Bot was down (no process running). Watchdog restarted it.` after a crash.
+
+**What it doesn't catch:** laptop entirely off. For that, add an external dead-man's-switch (e.g., Healthchecks.io ping every hour from the bot itself — see ADR-022 consequence).
 
 ---
 

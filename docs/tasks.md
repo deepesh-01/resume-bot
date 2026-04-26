@@ -990,6 +990,40 @@ If quality lifts noticeably, no need for lever (c). If it doesn't move (or moves
 
 ---
 
+# Build Step Q — Headless `cli-tailor` for System B integration
+*Add a second top-level entry point so System B (job-intake) can invoke the tailoring pipeline as a subprocess. ADR-021. Bot stays untouched.*
+
+## Q.1 — `src/cli-tailor.ts` (30 min)
+- New file, NOT imported from `src/index.ts` (so no Telegram bot startup).
+- Args: `--jd-path`, `--chat-id`, `--output-dir` (optional), `--output-format json`.
+- Pipeline: `createJobWorkspace` → `runTailoring` → `runCritic` → `runRefinement` (if score < `QUALITY_THRESHOLD` and gaps/violations) → `renderResumePdf`.
+- Output (single JSON line on stdout): `{ok, pdf_path, last_change, score, refinement_applied, duration_ms, error}`.
+- Exit codes: 0 ok, 1 caught failure, 2 bad args.
+- No DB writes (CLI is stateless; bot owns the job history).
+
+## Q.2 — Build & smoke (5 min)
+- `npm run typecheck` clean.
+- `npm run build` produces `dist/cli-tailor.js` alongside `dist/index.js`.
+- Manual invocation:
+  ```
+  node dist/cli-tailor.js \
+    --jd-path /tmp/test_jd.md \
+    --chat-id 1089113785 \
+    --output-format json
+  ```
+  Expect a JSON line with `ok:true` and a real PDF path.
+
+## Q.3 — Smoke checklist
+- [ ] Telegram bot still starts cleanly via `npm start` (no regression in import order).
+- [ ] CLI exits 0 with valid args and a real JD.
+- [ ] CLI exits 1 with a malformed JD path (file missing).
+- [ ] CLI exits 2 with missing `--chat-id`.
+- [ ] PDF lands at `~/bot/users/<chat_id>/jobs/<job_id>/final.pdf`; copied to `--output-dir/<job_id>.pdf` if provided.
+- [ ] `last_change.txt` content surfaces in JSON `last_change`.
+- [ ] Critic score (when present) surfaces in JSON `score`.
+
+---
+
 ## Out of scope (current)
 
 - Restore-from-tarball for archived jobs (ADR-010 noted).
@@ -997,3 +1031,56 @@ If quality lifts noticeably, no need for lever (c). If it doesn't move (or moves
 - Scheduled posting (cron-trigger on a saved JD).
 - Pre-commit doc-check git hook (manual `npm run docs:sync` only).
 - Two-stage classifier (lever c) — superseded by lever A.
+
+---
+
+# Build Step Watchdog — Heartbeat + auto-restart (ADR-022)
+
+*Two failure modes hit during build (process crash + process hang) require self-healing. Crash is caught by PID check; hang requires a heartbeat. Both fixed via in-bot heartbeat + external launchd watchdog.*
+
+## W.1 — Heartbeat module (15 min)
+- `src/heartbeat.ts`: `setInterval` writes `Date.now()` to `~/bot/.heartbeat` every 60s.
+- `startHeartbeat()` / `stopHeartbeat()` exported.
+- Timer `.unref()`'d so it doesn't pin the event loop on shutdown.
+
+## W.2 — Wire into `src/index.ts` (5 min)
+- Import alongside `archiveCron`.
+- `startHeartbeat()` after `startArchiveCron()`, before `bot.start()`.
+- `stopHeartbeat()` in the SIGINT/SIGTERM shutdown handler.
+
+## W.3 — Watchdog script (30 min)
+- `scripts/watchdog.sh`:
+  - `find_bot_pids()` — `pgrep -f "node dist/index\.js$"` filtered by `lsof` cwd matching `$REPO_ROOT` (so other unrelated bots don't false-match).
+  - `kill_bot()` — SIGINT + 5s + SIGKILL fallback.
+  - `start_bot()` — `cd $REPO_ROOT && nohup npm start >> $LOG_FILE 2>&1 &`. `disown` so it detaches.
+  - `notify_admin()` — reads `TELEGRAM_BOT_TOKEN` and `ADMIN_CHAT_IDS` from `.env`, curls `sendMessage` for each admin. Silent on failure.
+- Three restart paths, each with a different DM message:
+  - No process → "Bot was down (no process running). Watchdog restarted it."
+  - Heartbeat file missing → "Bot was running but heartbeat file was missing. Watchdog killed and restarted (was likely hung mid-startup)."
+  - Heartbeat stale (>180s) → "Bot was hung (heartbeat ${age}s stale, threshold ${THRESHOLD}s). Watchdog killed and restarted."
+- All-good path: log "ok" ~10% of runs (visibility without spam).
+- Logs to `~/bot/logs/watchdog.log`.
+
+## W.4 — launchd plist + install/uninstall (15 min)
+- `scripts/com.deepesh.resume-bot-watchdog.plist`:
+  - Label: `com.deepesh.resume-bot-watchdog`
+  - `StartInterval`: 120 (every 2 min)
+  - `RunAtLoad`: true
+  - `EnvironmentVariables.PATH` includes `~/.local/share/fnm/aliases/default/bin` so `node`/`npm` resolve.
+  - stdout/stderr to `~/bot/logs/watchdog.{stdout,stderr}.log`.
+- `scripts/install-watchdog.sh` — copies plist to `~/Library/LaunchAgents/`, `bootout`+`bootstrap` (idempotent), `kickstart -k` for immediate run.
+- `scripts/uninstall-watchdog.sh` — `bootout` + remove plist.
+
+## W.5 — Smoke checklist
+- [ ] `bash scripts/install-watchdog.sh` succeeds; `launchctl print` shows state=running.
+- [ ] After install, `~/bot/logs/watchdog.log` shows watchdog runs every 2 min.
+- [ ] Bot startup writes `~/bot/.heartbeat`; file age `< 60s` while bot is alive.
+- [ ] Kill bot manually (`kill -KILL <pid>`) → within 2 min, watchdog detects → bot restarts → admin DM arrives "🔄 Bot was down...".
+- [ ] Simulate hang (touch the heartbeat to old: `echo 0 > ~/bot/.heartbeat`) → wait 2-3 min → watchdog detects stale → kills + restarts → admin DM arrives.
+- [ ] Watchdog log has both `[ts] no bot process` / `[ts] heartbeat stale` lines and `[ts] started; new pids:` follow-ups.
+- [ ] `bash scripts/uninstall-watchdog.sh` removes the agent; bot keeps running but no longer auto-restarts.
+
+## W.6 — Out of scope
+- External dead-man's-switch for laptop-off scenarios (Healthchecks.io ping; would be a separate ADR if implemented).
+- Watchdog self-monitoring (if launchd itself is unhealthy, no recovery).
+- Per-restart cool-down to prevent thrashing if bot crashes repeatedly (current: restart every 2 min indefinitely).

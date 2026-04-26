@@ -337,4 +337,82 @@
 
 ---
 
+## ADR-021 · Headless `cli-tailor` entry parallel to the Telegram bot
+**Date:** 2026-04-26 · **Status:** Accepted
+
+**Context.** A sibling project — System B (`job-intake`, Python at
+`~/Documents/ready-to-apply/`) — scrapes job boards into a Google Sheet.
+When the user marks a Sheet row `status=tailor`, System B's processor
+needs to invoke System A's tailoring pipeline. System A is TypeScript/
+Node, System B is Python; in-process linking is not viable. The original
+§13.10 (System B design) called for a subprocess CLI on this side; until
+now, no headless entry existed (only `src/index.ts` → Telegram bot).
+
+**Decision.** Add `src/cli-tailor.ts` as a second top-level entry,
+compiled to `dist/cli-tailor.js`. Reuses `createJobWorkspace`,
+`runTailoring`, `runCritic`, `runRefinement`, `renderResumePdf` from
+existing modules. Takes args `--jd-path`, `--chat-id`, optional
+`--output-dir`, `--output-format json`. Emits one JSON line on stdout:
+`{ok, pdf_path, last_change, score, refinement_applied, duration_ms,
+error}`. Exit 0 on success, 1 on caught failure, 2 on bad args. Does
+NOT write to the SQLite DB (the bot owns DB writes; the CLI is a
+stateless invocation).
+
+**Reasoning.**
+- Reusing existing modules means tailoring quality, prompts, critic, and
+  refinement gate match the Telegram path exactly. No drift.
+- Subprocess JSON IO is the standard cross-language bridge.
+- Skipping DB writes keeps the bot's job history uncluttered. If we ever
+  want CLI-triggered jobs to be `/edit`-able from Telegram, that becomes
+  a follow-up ADR.
+- New file only — no edits to `src/index.ts`. The bot keeps running as a
+  background service, unaffected.
+
+**Consequence.**
+- `package.json` keeps `start` as `node dist/index.js` (bot). To run the
+  CLI: `node dist/cli-tailor.js …` directly. Could add an npm script
+  later if invocation becomes frequent.
+- Per-job workspace at `~/bot/users/<chat_id>/jobs/<job_id>/` is shared
+  with bot-created jobs. Same cleanup/archive policy applies.
+- Resume artifacts produced via CLI are NOT delivered through Telegram.
+  System B copies the PDF into its own `data/tailored/` and writes the
+  path back to the Sheet row.
+- `--allowedTools Read,Edit,Write` contract preserved (uses existing
+  `runTailoring()` which sets it).
+
+---
+
+## ADR-022 · Heartbeat file + launchd watchdog for self-healing
+**Date:** 2026-04-27 · **Status:** Accepted
+
+**Context.** Two failure modes were observed during the build:
+1. **Process crash** — uncaught exception kills `node dist/index.js`. PID gone, bot dead, no recovery.
+2. **Process hang** — process is alive (PID present, port listening) but stuck. Specifically observed on linkedin_4: `replyWithDocument` started, Telegram processed the upload, the bot's `await` never resolved, bot was unresponsive for 7 minutes until manual restart.
+
+A simple `pgrep` health check catches (1) but not (2). And without an external watcher, even (1) requires manual `npm start`.
+
+**Decision.** Two-part self-healing system:
+
+1. **In-bot heartbeat** (`src/heartbeat.ts`) — `setInterval` writes the current epoch ms to `~/bot/.heartbeat` every 60s. Started/stopped with the bot's lifecycle.
+2. **External watchdog** (`scripts/watchdog.sh` + launchd plist) — runs every 2 min. Checks:
+   - Is there a `node dist/index.js` process whose `cwd` is the repo? (cwd-filtered, so unrelated bots in other dirs don't false-match.)
+   - Is `~/bot/.heartbeat` newer than 180s?
+   If either fails: SIGINT → wait 5s → SIGKILL → spawn fresh `npm start`. Then DM admin via Telegram with the trigger reason ("no process" / "heartbeat missing" / "heartbeat 240s stale").
+
+**Reasoning.**
+- Heartbeat catches hangs that PID checks miss. The 60s tick + 180s threshold gives enough slack that a short GC pause or busy moment doesn't trigger a false restart, but a real hang is detected within 2-3 min.
+- launchd is the right OS scheduler on macOS — survives logout, `KeepAlive` semantics aren't needed since `StartInterval` reruns every 2 min.
+- DM-on-restart is the right notification pattern (ADR-derived from earlier discussion). Hourly "I'm alive" pings become noise; restart-only pings are pure signal.
+- Bot heartbeat token is read from `.env` directly by the watchdog script — no separate config.
+- Token + admin chat_ids are READ from `.env`, not embedded in the script — keeps the script portable across users.
+
+**Consequence.**
+- The bot has hard-to-test paths now: a stuck `replyWithDocument` self-heals within ~3 min, no human intervention.
+- Watchdog can't recover from laptop-off scenarios (it lives on the same laptop). For full uptime alerting in that case, add an external dead-man's-switch (Healthchecks.io ping every hour from the bot — separate ADR if implemented).
+- `npm start` from inside the watchdog detaches via `nohup` + `&` + `disown`. Process tree: launchd → watchdog.sh → npm → node. npm parent dies on completion; node becomes orphaned (parent=1). Acceptable.
+- New scripts: `scripts/watchdog.sh`, `scripts/install-watchdog.sh`, `scripts/uninstall-watchdog.sh`, `scripts/com.deepesh.resume-bot-watchdog.plist`.
+- New module: `src/heartbeat.ts` (started/stopped from `src/index.ts` boot path).
+
+---
+
 *New decisions append below this line.*
