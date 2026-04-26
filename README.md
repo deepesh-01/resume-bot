@@ -4,7 +4,7 @@ A private Telegram bot that tailors your resume to specific job descriptions. Se
 
 Personal-scale: runs on a laptop, uses your Claude Code CLI subscription, ~3 friends max.
 
-> **Part of an end-to-end job-application pipeline.** The companion repo [`deepesh-01/job-intake`](https://github.com/deepesh-01/job-intake) is a daily multi-board scraper + triage webapp that feeds JDs to this bot; this bot turns each JD into a tailored PDF in ~3 minutes via Claude Code CLI and a 3-pass quality loop (tailor → critic → refinement). A launchd watchdog with heartbeat-based detection, pid-file identification, and Telegram-DM restart attribution (ADR-022, ADR-025) keeps it self-healing on a laptop through crash, hang, external HTTP `/restart`, and admin-issued `/restart` from inside Telegram. Shipped solo over a weekend.
+> **Production rendering backend for an end-to-end job-application pipeline.** The orchestrator is [`deepesh-01/job-intake`](https://github.com/deepesh-01/job-intake) (live at [takejob.deepesh-engg.in](https://takejob.deepesh-engg.in)) — a Python scout cron scrapes job boards into a Google Sheet, a FastAPI + React webapp triages and scores postings, and triage actions invoke this repo's headless [`cli-tailor.js`](./src/cli-tailor.ts) (ADR-021) to produce tailored PDFs through a 3-pass quality loop (tailor → critic → refinement). The Telegram surface is the parallel manual-use entry point. A launchd watchdog with heartbeat-based detection, pid-file identification, and DM restart attribution (ADR-022, ADR-025) keeps the laptop-hosted bot self-healing through crash, hang, external HTTP `/restart`, and admin-issued `/restart` from inside Telegram. Shipped solo over a weekend.
 
 ---
 
