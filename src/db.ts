@@ -87,7 +87,10 @@ db.exec(SCHEMA)
 
 // Idempotent migrations for additive columns on previously-existing tables.
 // CREATE TABLE IF NOT EXISTS ignores schema diffs on tables that already exist.
-const migrations = ['ALTER TABLE jobs ADD COLUMN quality_score INTEGER']
+const migrations = [
+  'ALTER TABLE jobs ADD COLUMN quality_score INTEGER',
+  'ALTER TABLE users ADD COLUMN username TEXT',
+]
 for (const sql of migrations) {
   try {
     db.exec(sql)
@@ -128,16 +131,18 @@ export const getUser = (chat_id: number): UserRow | undefined =>
   _getUser.get(chat_id) as UserRow | undefined
 
 const _upsertUser = db.prepare(`
-  INSERT INTO users (chat_id, display_name, created_at, onboarded)
-  VALUES (@chat_id, @display_name, datetime('now'), 0)
+  INSERT INTO users (chat_id, display_name, username, created_at, onboarded)
+  VALUES (@chat_id, @display_name, @username, datetime('now'), 0)
   ON CONFLICT(chat_id) DO UPDATE SET
-    display_name = COALESCE(excluded.display_name, users.display_name)
+    display_name = COALESCE(excluded.display_name, users.display_name),
+    username     = COALESCE(excluded.username,     users.username)
 `)
 export const upsertUser = (params: {
   chat_id: number
   display_name: string | null
+  username?: string | null
 }): void => {
-  _upsertUser.run(params)
+  _upsertUser.run({ username: null, ...params })
 }
 
 const _setBasePath = db.prepare(
@@ -268,6 +273,7 @@ export const logUsage = (row: {
 export interface AllowedUserRow {
   chat_id: number
   display_name: string | null
+  username: string | null  // pulled via LEFT JOIN on users
   added_by: number | null
   added_at: string
   expires_at: string | null
@@ -367,7 +373,10 @@ export const listPending = (): PendingAccessRow[] =>
   _listPending.all() as PendingAccessRow[]
 
 const _listAllowedUsers = db.prepare(
-  `SELECT * FROM allowed_users ORDER BY added_at DESC`,
+  `SELECT a.*, u.username AS username
+     FROM allowed_users a
+     LEFT JOIN users u ON u.chat_id = a.chat_id
+    ORDER BY a.added_at DESC`,
 )
 export const listAllowedUsers = (): AllowedUserRow[] =>
   _listAllowedUsers.all() as AllowedUserRow[]
@@ -383,6 +392,7 @@ export const getAllowedUser = (chat_id: number): AllowedUserRow | undefined =>
 export interface BlockedUserRow {
   chat_id: number
   display_name: string | null
+  username: string | null  // pulled via LEFT JOIN on users
   blocked_by: number | null
   blocked_at: string
   reason: string | null
@@ -420,7 +430,10 @@ export const removeBlockedUser = (chat_id: number): boolean => {
 }
 
 const _listBlockedUsers = db.prepare(
-  `SELECT * FROM blocked_users ORDER BY blocked_at DESC`,
+  `SELECT b.*, u.username AS username
+     FROM blocked_users b
+     LEFT JOIN users u ON u.chat_id = b.chat_id
+    ORDER BY b.blocked_at DESC`,
 )
 export const listBlockedUsers = (): BlockedUserRow[] =>
   _listBlockedUsers.all() as BlockedUserRow[]

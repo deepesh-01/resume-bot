@@ -76,6 +76,8 @@ NODE_ENV=development
 QUALITY_THRESHOLD=80               # critic threshold; refinement below this
 HEALTH_PORT=8787                   # /healthz + /restart HTTP endpoint port; 0 disables
 WATCHDOG_RESTART_TOKEN=            # required header for POST /restart; empty disables it
+CLAUDE_WEEKLY_BUDGET_USD=          # rolling-7d cap; admins DMed at 80%. 0/empty disables
+HEALTHCHECKS_URL=                  # external uptime ping (Pattern C). Empty disables
 ```
 
 ### Boot
@@ -325,9 +327,11 @@ The critic is **read-only** (`--allowedTools Read`) and outputs structured JSON:
 - `src/access.ts` — admin notify, code generation
 - `src/disambiguate.ts` + `src/savePending.ts` — pending-state stores
 - `src/middleware/allowlist.ts` + `preOnboarding.ts` — gates
-- `src/heartbeat.ts` — heartbeat tick + `~/bot/.bot.pid` writer + `~/bot/.restart-reason` path (ADR-022, ADR-025)
+- `src/heartbeat.ts` — heartbeat tick + `~/bot/.bot.pid` writer + `~/bot/.restart-reason` path + Healthchecks.io ping (ADR-022, ADR-025, ADR-028)
 - `src/health.ts` — `/healthz` + `/restart` HTTP endpoints, async `stopHealthServer` for clean port release (ADR-023, ADR-025)
 - `src/menus.ts` — single source of truth for the Telegram command menu used by `/commands` and `setMyCommands` autocomplete (ADR-025)
+- `src/budget.ts` — rolling-7-day Claude spend tracker with one-shot 80% admin DM (ADR-027)
+- `src/render-base.ts` — headless `npm run render-base -- --chat-id <id>` to refresh `base_resume.pdf` from `base_resume.md` outside the Telegram bot
 - `src/textDebounce.ts` — REMOVED (ADR-016 superseded it)
 
 ---
@@ -488,9 +492,10 @@ npm start &
 - `~/bot/db.sqlite` — the only stateful data that matters
 - `~/bot/users/` — base_resume.md + context.md per user
 - `~/bot/archive/` — historical job tarballs
-- Time Machine covers it. For belt-and-suspenders:
+- **Automated daily backup (ADR-026):** `bash scripts/install-backup.sh` installs a launchd agent that runs `~/bot/bin/backup.sh` daily at 03:00 local. Tarballs go to `~/bot/backups/bot_YYYYMMDD_HHMMSS.tar.gz`; last 14 are kept, older are pruned. Logs to `~/bot/logs/backup.log`. Uses `sqlite3 .backup` so the live DB is captured consistently while WAL is open.
+- Time Machine covers it as a second layer. Manual one-shot:
   ```bash
-  tar czf ~/Backups/bot-$(date +%Y%m%d).tgz ~/bot/{db.sqlite,users,archive}
+  bash scripts/backup.sh        # writes to ~/bot/backups/, prunes >14
   ```
 - **Never sync `~/bot/secrets/`** to anything — credentials.
 
@@ -515,6 +520,11 @@ GROUP BY day
 ORDER BY day DESC;
 "
 ```
+
+**Weekly budget alert (ADR-027):** set `CLAUDE_WEEKLY_BUDGET_USD=<n>` in `.env` and the bot will DM admins once a day if the rolling-7-day spend crosses 80% of that cap. Persisted to `~/bot/.budget-alert.json` so a restart doesn't re-fire on the same window. Empty/0 disables tracking entirely.
+
+### External uptime ping (Pattern C, ADR-028)
+The local launchd watchdog can't detect a laptop-off scenario (it lives on the same laptop). For that, set `HEALTHCHECKS_URL=https://hc-ping.com/<uuid>` in `.env` — the bot's heartbeat tick (every 60s) GETs that URL. Configure your Healthchecks.io check with a 2-3 min grace period so a brief network blip doesn't alert. Empty URL disables the ping.
 
 ### Decommissioning
 1. Stop the bot (Ctrl-C or kill PID)
@@ -547,8 +557,8 @@ ORDER BY day DESC;
 - **Restore-from-tarball** for archived jobs — currently `/edit JOB_ID` on an archived job tells you to `/reset` and re-run from JD; could instead untar and reactivate
 - **Multi-resume support** — single `base_resume.md` per user. Could add named variants (e.g. `base_resume_backend.md`, `base_resume_ml.md`) and a `/setbase NAME` command
 - **Scheduled posting** — fire a JD URL on a schedule; not yet wired
-- **Pre-commit doc check** — see `scripts/docs-sync.sh` and the project CLAUDE.md; currently manual run
 - **Re-critique after refinement** — currently we trust the refinement; could re-score for transparency at +$0.20-0.40/job
+- **Lever (c) — two-stage classifier** (~3 hr) — a JD is first classified ("backend / ML / SRE / …") and then a stage-specific prompt is selected; deferred from the original Lever A push because lever A delivered the quality lift on its own. Revisit if quality plateaus on hard JDs (ADR-007/008/009 context).
 
 ---
 

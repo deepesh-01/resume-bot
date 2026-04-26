@@ -7,7 +7,11 @@ export const startHandler = async (ctx: BotContext): Promise<void> => {
   if (chatId === undefined) return
 
   const displayName = ctx.from?.username ?? ctx.from?.first_name ?? null
-  upsertUser({ chat_id: chatId, display_name: displayName })
+  upsertUser({
+    chat_id: chatId,
+    display_name: displayName,
+    username: ctx.from?.username ?? null,
+  })
 
   ctx.logger.info(
     { event: 'start', chat_id: chatId, display_name: displayName },

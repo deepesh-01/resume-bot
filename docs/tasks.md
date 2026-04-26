@@ -1187,3 +1187,47 @@ If quality lifts noticeably, no need for lever (c). If it doesn't move (or moves
 - [ ] Send `/commands` from Telegram → reply is a list of `/start /help /commands …` lines (tappable). As admin, also includes the `— admin —` block ending in `/restart`.
 - [ ] In Telegram client: type `/` and verify autocomplete pops up the command list. Public chats see public-only; admin chats also see admin commands.
 - [ ] `launchctl print "gui/$(id -u)/com.deepesh.resume-bot-watchdog" | grep "last exit"` shows `last exit code = 0`. `~/bot/logs/watchdog.stderr.log` has no new `Operation not permitted` lines after install.
+
+---
+
+# Build Step Quality-of-Life — render-base CLI, daily backup, /users with username, weekly budget alert, Healthchecks.io ping (ADR-026, ADR-027, ADR-028)
+
+*Drains the out-of-scope queue from the deleted `next-session-tasks.md`. Five small features that round out operational hygiene without expanding feature surface in the bot itself.*
+
+## QOL.1 — `npm run render-base` headless renderer (15 min)
+- New `src/render-base.ts`: `--chat-id <id>` or `--all`. Stages `base_resume.md` into a temp dir, calls `renderResumePdf` (existing `pandoc → typst` pipeline), copies `final.pdf` back to `<userDir>/base_resume.pdf`.
+- Wire `npm run render-base` in `package.json`.
+- Useful when an admin edits `base_resume.md` out-of-band and needs to refresh the sibling PDF without going through the Telegram `/reupload` flow.
+
+## QOL.2 — Daily backup launchd cron (15 min)
+- `scripts/backup.sh`: `sqlite3 .backup` → `~/bot/backups/bot_YYYYMMDD_HHMMSS.tar.gz`, includes `users/` + `archive/`, excludes runtime transients (`.heartbeat`, `.bot.pid`, `.restart-reason`, `logs/`). Retention: keep last 14, prune older.
+- `scripts/install-backup.sh` mirrors the watchdog install pattern (ADR-025): copies the script to `~/bot/bin/backup.sh` and bootstraps a `StartCalendarInterval` plist firing at 03:00 local.
+- `scripts/uninstall-backup.sh` boots out the agent and removes the deployed script. Existing tarballs preserved.
+- ADR-026.
+
+## QOL.3 — `/users` shows @username (10 min)
+- Migration: `ALTER TABLE users ADD COLUMN username TEXT` (idempotent — caught by the duplicate-column swallow in `src/db.ts`).
+- `upsertUser` accepts an optional `username`; `startHandler` and `documentHandler` now pass `ctx.from?.username`.
+- `listAllowedUsers` and `listBlockedUsers` `LEFT JOIN users` to pull `username` into their row types.
+- `usersHandler` displays `@username` when present, falls back to `display_name`.
+
+## QOL.4 — Weekly Claude spend alert at 80% (30 min)
+- New env var `CLAUDE_WEEKLY_BUDGET_USD` (0/empty disables).
+- New `src/budget.ts`: `getWeeklySpendUsd()` (sum from `usage` table, last 7 days) + `checkAndAlertIfOver80(bot)` (DM admins once per 24h cooldown when crossed). State in `~/bot/.budget-alert.json`.
+- Called from `runJob`'s and `runEdit`'s `finally` blocks so any job-driven invocation gets the check.
+- ADR-027.
+
+## QOL.5 — Healthchecks.io external ping (Pattern C) (15 min)
+- New env var `HEALTHCHECKS_URL` (empty disables).
+- `src/heartbeat.ts` `tick()` GETs the URL on every 60s heartbeat. 10s `AbortController` timeout, single warn on failure, recovery message when it returns.
+- Detects laptop-off scenarios that the local launchd watchdog can't catch.
+- ADR-028.
+
+## QOL.6 — Smoke checklist
+- [ ] `npm run render-base -- --chat-id <id>` writes a fresh `base_resume.pdf` whose mtime is newer than `base_resume.md`.
+- [ ] `bash scripts/install-backup.sh` → `launchctl print` shows `last exit code = 0` and a tarball appears in `~/bot/backups/`. Re-running install is idempotent.
+- [ ] After 14 successful backups, only the most recent 14 remain in `~/bot/backups/`.
+- [ ] `/users` reply renders `@username` for users who interacted post-migration. Older rows fall back to `display_name`.
+- [ ] Set `CLAUDE_WEEKLY_BUDGET_USD=0.10` and run a job → admins get a single DM `⚠️ Claude weekly spend at NN% of cap …`. Re-run within 24h → no second DM. After 24h → eligible to re-fire.
+- [ ] Set `HEALTHCHECKS_URL` to a valid Healthchecks.io URL → check shows `up` within 60s of bot start. Stop the bot → check transitions to `down` after the configured grace period.
+- [ ] All env vars are optional — bot boots cleanly with `CLAUDE_WEEKLY_BUDGET_USD=` and `HEALTHCHECKS_URL=` empty (no warnings, no crashes).

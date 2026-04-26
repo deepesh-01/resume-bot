@@ -512,4 +512,69 @@ Also rolled in: `stopHealthServer` is now `async` and awaits `server.closeAllCon
 
 ---
 
+## ADR-026 · Daily backup cron via launchd, kept inside `~/bot/`
+**Date:** 2026-04-27 · **Status:** Accepted
+
+**Context.** The bot's only authoritative state is `~/bot/db.sqlite` (jobs, usage, allowed_users, etc.) plus `~/bot/users/<chat_id>/` (base resumes + context). Time Machine covers the laptop, but it's hourly snapshots of the whole machine — slow to find a specific bot row from a week ago, and not portable to a different machine. We want a small, scoped, fast-to-restore backup of just the bot's state.
+
+**Decision.** Three pieces, mirroring the watchdog pattern (ADR-025):
+
+1. `scripts/backup.sh` — date-stamped tarball at `~/bot/backups/bot_YYYYMMDD_HHMMSS.tar.gz`. DB captured via `sqlite3 .backup` (consistent across WAL); users/ + archive/ tar'd directly. Excludes the runtime transients (`.heartbeat`, `.bot.pid`, `.restart-reason`, `logs/`). Retention: keep last 14, prune older.
+2. `scripts/install-backup.sh` — copies the script to `~/bot/bin/backup.sh` (TCC sidestep, same as ADR-025) and bootstraps a `StartCalendarInterval` launchd agent that fires daily at 03:00 local.
+3. `scripts/uninstall-backup.sh` — bootout + remove the deployed script. Existing tarballs in `~/bot/backups/` are left in place.
+
+**Reasoning.**
+- `sqlite3 .backup` is the only safe way to copy a live SQLite DB while the bot is writing. A naive `cp` of `db.sqlite` while WAL is open can produce a torn file.
+- `StartCalendarInterval` (vs. `StartInterval`) is right for a daily job — it fires on a wall clock instead of N seconds since last run, so missing one day because the laptop was asleep doesn't push subsequent backups out of phase.
+- Retention at 14 is a "two weeks of recovery" target. Tarballs are ~1-2 MB each so storage cost is negligible.
+- Keeping backups under `~/bot/backups/` (not `~/Backups/`) makes the bot's stateful surface area self-contained — one directory to back up off-machine if needed.
+
+**Consequence.**
+- New scripts: `scripts/backup.sh`, `scripts/install-backup.sh`, `scripts/uninstall-backup.sh`, `scripts/com.deepesh.resume-bot-backup.plist`.
+- New runtime dirs: `~/bot/backups/`, `~/bot/bin/` (shared with the watchdog).
+- New log: `~/bot/logs/backup.log`.
+- Recovery: `tar xzf ~/bot/backups/bot_YYYYMMDD_HHMMSS.tar.gz -C ~/bot.restored/` and either point the bot at the restored dir via `WORKSPACE_ROOT`/`DB_PATH`, or `mv` the existing `~/bot` aside and `mv` the restore in.
+
+---
+
+## ADR-027 · Weekly Claude spend alert at 80% of cap (proactive, not reactive)
+**Date:** 2026-04-27 · **Status:** Accepted
+
+**Context.** Claude Code's subscription has a rolling weekly cap. When the user crosses it mid-job, the bot surfaces `CLAUDE_RATE_LIMIT` to whoever asked — disruptive UX, especially for friends who don't know what's going on. We log every invocation's `total_cost_usd` to the `usage` table, so we can see the cap coming.
+
+**Decision.** Add `CLAUDE_WEEKLY_BUDGET_USD` (env var, default 0=disabled). After every job-driven `logUsage`, query `SUM(total_cost_usd) WHERE created_at >= now-7d` and compare against the cap. When the rolling spend crosses 80%, DM admins once. Persist `last_alert_ms` to `~/bot/.budget-alert.json` with a 24h cooldown so a flapping spend curve doesn't spam the chat.
+
+**Reasoning.**
+- One configurable cap, one threshold (80%), one cooldown (24h) — fewer moving parts than tracking percent-of-cap-per-day or compute-per-friend allotments.
+- Default-disabled keeps onboarding simple and avoids wrong-cap noise (the actual subscription cap varies per plan).
+- Calling it from `runJob`/`runEdit`'s `finally` block (one budget check per user-facing job) is cheap — one indexed `SUM` on the usage table.
+- We deliberately do NOT block jobs at 80% — only DM. Deciding to throttle the user's own work is a policy call we don't want to bake in here.
+
+**Consequence.**
+- New env var `CLAUDE_WEEKLY_BUDGET_USD`. Documented in `how-to-journey.md` Setup snippet and in the Cost-tracking section.
+- New module `src/budget.ts` exporting `getWeeklySpendUsd()` and `checkAndAlertIfOver80(bot)`.
+- New runtime file `~/bot/.budget-alert.json` (single small JSON object).
+
+---
+
+## ADR-028 · External uptime ping (Pattern C) via Healthchecks.io
+**Date:** 2026-04-27 · **Status:** Accepted
+
+**Context.** The launchd watchdog (ADR-022/025) is a *local* self-healer — it lives on the same laptop as the bot. It catches process crashes and process hangs, but it's blind to the laptop being off, sleeping, or completely off the network. We need a truly external observer for that case.
+
+**Decision.** Use [Healthchecks.io](https://healthchecks.io)'s pull-based ping model. Add `HEALTHCHECKS_URL` env var. The bot's existing 60s heartbeat tick `GET`s that URL on every fire. The remote service alerts (email / SMS / webhook / etc — the user configures it server-side) when it stops hearing from us for longer than its configured grace period.
+
+**Reasoning.**
+- We already had a 60s tick — adding a second side-effect to it costs us nothing.
+- Pull-only model: we don't have to expose the bot to the public internet. Outbound HTTPS is universally allowed.
+- Empty env var disables the ping cleanly, including the `fetch` cost. No-op for users who don't need this.
+- Failure handling: `try/catch + AbortController` 10s timeout, log a single warn on failure, suppress further warns until a successful ping recovers (so a flaky network doesn't spam the log).
+- Healthchecks.io specifically (vs Better Uptime, UptimeRobot, etc.): free tier is generous, server-side alerting is configurable per-check, and the ping URL is opaque (no inbound exposure). Any pull-based pinger with a unique URL would work — the contract is just "GET this every minute"; the env var name is generic enough to point at any equivalent service.
+
+**Consequence.**
+- New env var `HEALTHCHECKS_URL`. Documented in `how-to-journey.md` Setup snippet and in a new "External uptime ping" subsection.
+- `src/heartbeat.ts` gains a `pingHealthchecks()` helper called from `tick()`. No bot logic depends on the response.
+
+---
+
 *New decisions append below this line.*

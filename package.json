@@ -13,7 +13,8 @@
     "init-workspace": "bash scripts/init-workspace.sh",
     "typecheck": "tsc -p . --noEmit",
     "docs:check": "bash scripts/docs-sync.sh check",
-    "docs:sync": "bash scripts/docs-sync.sh apply"
+    "docs:sync": "bash scripts/docs-sync.sh apply",
+    "render-base": "node dist/render-base.js"
   },
   "dependencies": {
     "better-sqlite3": "^12.9.0",

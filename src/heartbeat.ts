@@ -35,6 +35,47 @@ export const BOT_PID_FILE = path.join(
 )
 
 let timer: NodeJS.Timeout | undefined
+let healthchecksWarned = false
+
+// External dead-man's-switch ping (Pattern C). When HEALTHCHECKS_URL is
+// set, every heartbeat tick GETs it. The remote service alerts when it
+// stops hearing from us — including the laptop-off case our local
+// launchd watchdog can't catch. Silent on transient failure; warns once
+// if the URL is permanently broken.
+const pingHealthchecks = async (): Promise<void> => {
+  const url = config.HEALTHCHECKS_URL
+  if (!url) return
+  try {
+    const ac = new AbortController()
+    const t = setTimeout(() => ac.abort(), 10_000)
+    try {
+      const res = await fetch(url, { method: 'GET', signal: ac.signal })
+      if (!res.ok && !healthchecksWarned) {
+        logger.warn(
+          { event: 'healthchecks_ping_bad_status', url, status: res.status },
+          'Healthchecks.io returned non-2xx; subsequent failures will be silent',
+        )
+        healthchecksWarned = true
+      } else if (res.ok && healthchecksWarned) {
+        logger.info(
+          { event: 'healthchecks_ping_recovered', url },
+          'Healthchecks.io responding again',
+        )
+        healthchecksWarned = false
+      }
+    } finally {
+      clearTimeout(t)
+    }
+  } catch (err) {
+    if (!healthchecksWarned) {
+      logger.warn(
+        { event: 'healthchecks_ping_failed', err: String(err), url },
+        'Healthchecks.io ping failed; subsequent failures will be silent',
+      )
+      healthchecksWarned = true
+    }
+  }
+}
 
 const tick = async (): Promise<void> => {
   try {
@@ -46,6 +87,7 @@ const tick = async (): Promise<void> => {
       'heartbeat write failed',
     )
   }
+  void pingHealthchecks()
 }
 
 export const startHeartbeat = (): void => {

@@ -13,6 +13,8 @@ import {
 } from './claude.js'
 import { renderResumePdf, RenderError } from './render.js'
 import { buildPdfFilename, getCandidateName } from './pdfName.js'
+import { checkAndAlertIfOver80 } from './budget.js'
+import { bot } from './bot.js'
 import {
   createJob,
   setJobStatus,
@@ -331,6 +333,10 @@ export const runJob = async (
           ctx.logger.warn({ notifyErr }, 'owner notify failed')
         }
       }
+    } finally {
+      // Best-effort: surface a one-shot DM if rolling-7-day Claude spend
+      // crossed the configured 80% threshold. No-op when budget unset.
+      void checkAndAlertIfOver80(bot)
     }
   })
 }

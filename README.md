@@ -8,6 +8,19 @@ Personal-scale: runs on a laptop, uses your Claude Code CLI subscription, ~3 fri
 
 ---
 
+## In production
+
+Used as the rendering backend for a real job-application pipeline I run on my own laptop.
+
+| Where | What | Link |
+|---|---|---|
+| **`deepesh-01/job-intake`** | Scout (Python cron) → Google Sheet → FastAPI + React triage UI → invokes `cli-tailor.js` from this repo → tailored PDF → Drive | [github.com/deepesh-01/job-intake](https://github.com/deepesh-01/job-intake) |
+| **takejob.deepesh-engg.in** | Read-only public view of the triage UI (Cloudflare Tunnel → laptop) | [takejob.deepesh-engg.in](https://takejob.deepesh-engg.in) |
+
+The repo you're reading is **System A** (resume rendering); `job-intake` is **System B** (sourcing + triage). They communicate by subprocess: `node dist/cli-tailor.js --jd-path <md> --chat-id <id> --output-dir <dir> --output-format json`. The Telegram bot in this repo is the parallel manual-use surface.
+
+---
+
 ## Quick start
 
 ### Prerequisites

@@ -68,6 +68,16 @@ const parseHealthPort = (): number => {
   return Number.isFinite(n) && n >= 0 && n <= 65535 ? n : 8787
 }
 
+// Optional: rolling-7-day Claude spend cap in USD. When the running total
+// crosses 80% of this, admins get a one-shot DM. 0/unset disables the
+// check entirely (no tracking overhead, no DMs).
+const parseWeeklyBudget = (): number => {
+  const raw = process.env.CLAUDE_WEEKLY_BUDGET_USD
+  if (!raw || raw.trim() === '') return 0
+  const n = Number(raw)
+  return Number.isFinite(n) && n > 0 ? n : 0
+}
+
 export const config = {
   TELEGRAM_BOT_TOKEN: process.env.TELEGRAM_BOT_TOKEN!,
   ALLOWED_CHAT_IDS: parseChatIds(process.env.ALLOWED_CHAT_IDS!),
@@ -83,6 +93,11 @@ export const config = {
   HEALTH_PORT: parseHealthPort(),
   // Optional: enables /restart endpoint when set. Empty/undefined disables it.
   WATCHDOG_RESTART_TOKEN: process.env.WATCHDOG_RESTART_TOKEN ?? '',
+  // Optional: rolling-7-day spend cap. 0 disables the budget alert.
+  CLAUDE_WEEKLY_BUDGET_USD: parseWeeklyBudget(),
+  // Optional: external uptime monitor URL (Healthchecks.io etc). Empty
+  // disables the ping. Heartbeat tick GETs this URL every 60s.
+  HEALTHCHECKS_URL: process.env.HEALTHCHECKS_URL ?? '',
 } as const
 
 export const isProd = config.NODE_ENV === 'production'

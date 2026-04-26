@@ -51,6 +51,7 @@ export const documentHandler = async (ctx: BotContext): Promise<void> => {
   upsertUser({
     chat_id: chatId,
     display_name: ctx.from?.username ?? ctx.from?.first_name ?? null,
+    username: ctx.from?.username ?? null,
   })
 
   await ctx.reply(STRINGS.readingResume)

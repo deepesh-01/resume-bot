@@ -89,24 +89,34 @@ export const usersHandler = async (ctx: BotContext): Promise<void> => {
   const allowed = listAllowedUsers()
   const blocked = listBlockedUsers()
 
+  const handle = (
+    username: string | null,
+    display_name: string | null,
+  ): string => {
+    if (username) return `@${escapeHtml(username)}`
+    return escapeHtml(display_name ?? '—')
+  }
+
   const lines: string[] = []
   lines.push(`<b>Allowed users (${allowed.length})</b>`)
   if (allowed.length === 0) lines.push('(none)')
   for (const u of allowed) {
-    const name = escapeHtml(u.display_name ?? '—')
     const expiry = u.expires_at
       ? `expires ${escapeHtml(u.expires_at)} UTC`
       : '<i>permanent</i>'
-    lines.push(`• <code>${u.chat_id}</code> — ${name} · ${expiry}`)
+    lines.push(
+      `• <code>${u.chat_id}</code> — ${handle(u.username, u.display_name)} · ${expiry}`,
+    )
   }
 
   lines.push('')
   lines.push(`<b>Blocked users (${blocked.length})</b>`)
   if (blocked.length === 0) lines.push('(none)')
   for (const u of blocked) {
-    const name = escapeHtml(u.display_name ?? '—')
     const reason = u.reason ? ` · "${escapeHtml(u.reason)}"` : ''
-    lines.push(`• <code>${u.chat_id}</code> — ${name}${reason}`)
+    lines.push(
+      `• <code>${u.chat_id}</code> — ${handle(u.username, u.display_name)}${reason}`,
+    )
   }
 
   lines.push('')

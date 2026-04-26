@@ -13,6 +13,8 @@ import {
   logUsage,
 } from './db.js'
 import { STRINGS } from './strings.js'
+import { checkAndAlertIfOver80 } from './budget.js'
+import { bot } from './bot.js'
 
 const mapErrorToString = (err: unknown): string => {
   if (err instanceof ClaudeError) {
@@ -115,6 +117,10 @@ export const runEditFlow = async (
       } catch (replyErr) {
         ctx.logger.warn({ replyErr }, 'failed to send edit error reply')
       }
+    } finally {
+      // Same one-shot weekly-budget check as runJob; budget tracking
+      // disabled by default (CLAUDE_WEEKLY_BUDGET_USD=0).
+      void checkAndAlertIfOver80(bot)
     }
   })
 }
