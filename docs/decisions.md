@@ -577,4 +577,36 @@ Also rolled in: `stopHealthServer` is now `async` and awaits `server.closeAllCon
 
 ---
 
+## ADR-029 · Restart-attribution DM moves from the watchdog into the bot's boot path
+**Date:** 2026-04-27 · **Status:** Accepted · **Supersedes parts of:** ADR-025
+
+**Context.** ADR-025 put the post-restart DM logic inside the launchd watchdog: after the watchdog respawned the bot, it read + deleted `~/bot/.restart-reason` and DMed admins with the recorded attribution string. This worked when the watchdog was the only supervisor.
+
+In production at 05:21 IST on 2026-04-27 we caught the failure mode: a sibling project's `python -m web.server` (job-intake's webapp at `~/Documents/ready-to-apply/`, which runs `npm start` to keep this bot up too) beat the watchdog by ~90 seconds to spawn a new bot after a Telegram `/restart`. Process-tree confirmation: `pid 22892 → npm start (22881) → python -m web.server (9392)`. By the time the watchdog's next 2-min tick ran, the bot was already healthy. The watchdog took the happy path, hit a "race-cleanup" line that deleted the orphan reason file, and stayed silent. The user got their pre-exit `♻️ Restarting now…` reply but never the post-respawn confirmation. The DM was eaten by the race.
+
+The architectural mistake: **post-restart attribution belongs to the BOT, not the watchdog.** Only the bot itself can confirm it's actually serving Telegram again — `process started` is not the same as `process is healthy and polling`. The watchdog's job is to detect failures the bot can't speak for itself (crash, hang).
+
+**Decision.** Move the reason-file consumer from the watchdog into the bot's boot path:
+
+1. **Bot, on boot** (`src/index.ts` `announceRestartAfterRespawn`): if `~/bot/.restart-reason` exists, read it, DM admins `🔄 Bot back online — <reason> · HH:MM TZ`, then delete the file. Runs in parallel with `bot.start()` since `bot.api.sendMessage` is a stateless HTTP call. Delete-before-DM ordering so a partial DM failure can't loop on the same reason next boot.
+2. **Watchdog** (`scripts/watchdog.sh`): `read_and_clear_reason()` removed. Race-cleanup line in the healthy path removed. Spawn-path DMs and hung-restart DMs gated by `[ ! -f "$RESTART_REASON_FILE" ]` — the watchdog stays silent when a reason file exists because the bot will speak for itself once it's up.
+
+**Reasoning.**
+- The bot is the only process that can prove "Telegram polling is up" after a restart. The watchdog can confirm "a process is alive at a pid" but not that the new process is actually serving requests. Distinguishing these two is the whole point of the heartbeat — apply it consistently.
+- The bug the old design carried — silent reason-file cleanup whenever a sibling supervisor wins the spawn race — gets fixed by construction. The bot's boot is the authoritative consumer regardless of which supervisor (launchd watchdog, sibling project's `npm start`, manual run) won the race.
+- The "respawned by resume-builder watchdog" language in the old DMs was already a stretch in practice — the watchdog's `start_bot` calls `nohup npm start &`, npm dies once node is up, and the actual bot process gets reparented to init. Saying "respawned by the watchdog" was tracking *intent*, not *parentage*. The new DM (`back online`) describes a state the bot can verify.
+- Watchdog DMs are preserved for the cases the bot can't speak for itself: crash with no reason file (`⚠️ Bot crashed (no process running) · respawned by resume-builder watchdog · …`) and hang (`🔄 Bot was hung (heartbeat Xs stale) · killed + restarted by resume-builder watchdog · …`).
+
+**Consequence.**
+- New helper in `src/index.ts`: `announceRestartAfterRespawn()`. Reads `RESTART_REASON_FILE`, DMs `config.ADMIN_CHAT_IDS`, deletes the file. `formatTime()` mirrors the watchdog's `date '+%H:%M %Z'` output so DM timestamps stay visually consistent across emitters.
+- Watchdog code is shorter: `read_and_clear_reason()` deleted entirely, three call sites simplified to `[ ! -f "$RESTART_REASON_FILE" ] && notify_admin "..."`.
+- DM count per restart event:
+  - `/restart` (any supervisor respawns): 1 DM, from the bot. Bug fixed.
+  - Crash without reason: 1 DM, from the watchdog (unchanged).
+  - Hang without reason: 1 DM, from the watchdog (unchanged).
+  - Crash *or* hang while a reason file happened to be present (rare race): 1 DM, from the bot. Watchdog stays silent.
+- DM wording changes from `🔄 Bot restarted: <reason> · respawned by resume-builder watchdog · TZ` to `🔄 Bot back online — <reason> · TZ`. The `back online` framing is more honest about what the bot can observe.
+
+---
+
 *New decisions append below this line.*

@@ -1,10 +1,15 @@
 // Boot order matters: env validation -> logger -> db -> bot -> middleware -> handlers.
+import fs from 'node:fs/promises'
 import { config } from './config.js'
 import { logger } from './logger.js'
 import { closeDb } from './db.js'
 import { bot } from './bot.js'
 import { startArchiveCron, stopArchiveCron } from './archiveCron.js'
-import { startHeartbeat, stopHeartbeat } from './heartbeat.js'
+import {
+  startHeartbeat,
+  stopHeartbeat,
+  RESTART_REASON_FILE,
+} from './heartbeat.js'
 import { startHealthServer, stopHealthServer } from './health.js'
 import { allowlist } from './middleware/allowlist.js'
 import { preOnboarding } from './middleware/preOnboarding.js'
@@ -88,6 +93,60 @@ const shutdown = async (signal: string): Promise<void> => {
 process.once('SIGINT', () => void shutdown('SIGINT'))
 process.once('SIGTERM', () => void shutdown('SIGTERM'))
 
+// Format wall-clock time + timezone abbreviation, mirroring the watchdog's
+// `date '+%H:%M %Z'` so DM timestamps look the same regardless of which
+// process emitted them.
+const formatTime = (): string => {
+  const d = new Date()
+  const hh = String(d.getHours()).padStart(2, '0')
+  const mm = String(d.getMinutes()).padStart(2, '0')
+  const tz =
+    new Intl.DateTimeFormat('en-US', { timeZoneName: 'short' })
+      .formatToParts(d)
+      .find((p) => p.type === 'timeZoneName')?.value ?? ''
+  return tz ? `${hh}:${mm} ${tz}` : `${hh}:${mm}`
+}
+
+// Read + delete ~/bot/.restart-reason on boot and DM admins with the
+// recorded attribution. This is the authoritative post-restart confirmation
+// path — fires when the BOT process is fully serving Telegram, regardless
+// of which supervisor (launchd watchdog, sibling project's `npm start`,
+// manual run) actually respawned us. Previously the watchdog handled this,
+// but a sibling project beating the watchdog to spawn a new bot caused the
+// reason file to be silently cleaned up without a DM (race observed in
+// production at 05:21 IST when job-intake's web.server respawned the bot
+// 90s before the watchdog's next tick).
+const announceRestartAfterRespawn = async (): Promise<void> => {
+  let reason: string
+  try {
+    reason = (await fs.readFile(RESTART_REASON_FILE, 'utf8')).trim()
+  } catch {
+    return // no reason file → normal cold start, nothing to announce
+  }
+  if (!reason) {
+    await fs.unlink(RESTART_REASON_FILE).catch(() => undefined)
+    return
+  }
+  // Delete BEFORE DMing so a partial failure can't loop on the same reason.
+  await fs.unlink(RESTART_REASON_FILE).catch(() => undefined)
+
+  const msg = `🔄 Bot back online — ${reason} · ${formatTime()}`
+  for (const adminId of config.ADMIN_CHAT_IDS) {
+    try {
+      await bot.api.sendMessage(adminId, msg)
+    } catch (err) {
+      logger.warn(
+        { err: String(err), admin_chat_id: adminId },
+        'restart-announce DM failed',
+      )
+    }
+  }
+  logger.info(
+    { event: 'restart_announced', reason },
+    'post-restart DM sent to admins',
+  )
+}
+
 // Register Telegram autocomplete menus. Default scope is public commands;
 // each admin chat additionally gets the admin commands. Best-effort —
 // failure here doesn't block bot start.
@@ -120,6 +179,7 @@ startArchiveCron()
 startHeartbeat()
 startHealthServer()
 void registerCommandMenus()
+void announceRestartAfterRespawn()
 
 bot.start({
   onStart: () => {

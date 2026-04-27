@@ -414,10 +414,10 @@ tail -f ~/bot/logs/watchdog.log
 ```
 
 **What you'll see in your Telegram chat:**
-- Nothing during normal operation. Healthy ticks log to `watchdog.log` ~10% of the time as `ok (heartbeat_age=…)`.
-- `⚠️ Bot crashed (no process running) · respawned by resume-builder watchdog · 14:22 IST` after an unattributed crash.
-- `🔄 Bot was hung (heartbeat 245s stale, threshold 180s) · killed + restarted by resume-builder watchdog · 14:22 IST` when a hang is auto-recovered.
-- `🔄 Bot restarted: <reason> · respawned by resume-builder watchdog · 14:22 IST` when something asked for the restart. Reason values:
+- Nothing during normal operation. Healthy watchdog ticks log to `watchdog.log` ~10% of the time as `ok (heartbeat_age=…)`.
+- `⚠️ Bot crashed (no process running) · respawned by resume-builder watchdog · 14:22 IST` after an unattributed crash. Sent by the watchdog.
+- `🔄 Bot was hung (heartbeat 245s stale, threshold 180s) · killed + restarted by resume-builder watchdog · 14:22 IST` when a hang is auto-recovered. Sent by the watchdog.
+- `🔄 Bot back online — <reason> · 14:22 IST` after any reason-attributed restart. **Sent by the bot itself on boot** (ADR-029) — the watchdog stays silent in this case so we don't double-DM. Reason values:
   - `HTTP /restart from <X-Watchdog-Source>` — third-party uptime monitor or scripted restart.
   - `Telegram /restart by @user` — admin invoked the `/restart` command.
 

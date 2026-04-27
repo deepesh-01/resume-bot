@@ -108,17 +108,6 @@ kill_bot() {
   rm -f "$BOT_PID_FILE"
 }
 
-# read_and_clear_reason — returns content of $RESTART_REASON_FILE (if any)
-# and deletes the file. Empty output means no recorded reason.
-read_and_clear_reason() {
-  if [ -f "$RESTART_REASON_FILE" ]; then
-    local r
-    r=$(cat "$RESTART_REASON_FILE" 2>/dev/null | head -c 200 | tr -d '\r\n' || true)
-    rm -f "$RESTART_REASON_FILE" 2>/dev/null || true
-    echo "$r"
-  fi
-}
-
 # ----- run -----
 # Heartbeat-first: if the heartbeat file is fresh, the bot is alive. Don't
 # touch lsof, don't restart. This is the path that fires 99% of the time.
@@ -129,9 +118,12 @@ if [ -f "$HEARTBEAT_FILE" ]; then
   THRESHOLD_MS=$((HEARTBEAT_STALE_SECONDS * 1000))
 
   if [ "$AGE_MS" -ge 0 ] && [ "$AGE_MS" -le "$THRESHOLD_MS" ]; then
-    # Healthy. Clean up any stale reason file (e.g., bot exited cleanly via
-    # /restart but a fresh process started before our tick — race cleanup).
-    [ -f "$RESTART_REASON_FILE" ] && rm -f "$RESTART_REASON_FILE"
+    # Healthy. We deliberately do NOT touch $RESTART_REASON_FILE here — the
+    # bot itself reads + deletes it on boot (see src/index.ts
+    # announceRestartAfterRespawn). A previous version cleaned it up as
+    # "race-cleanup" if it found one alongside a healthy bot, but that
+    # silently dropped the post-restart DM whenever a sibling supervisor
+    # (e.g. job-intake's web.server) beat the watchdog to spawn a new bot.
     # Log occasionally for visibility (every ~10 runs = 20 min).
     RAND=$((RANDOM % 10))
     if [ "$RAND" -eq 0 ]; then
@@ -148,10 +140,11 @@ BOT_PID=$(find_bot_pid 2>/dev/null || true)
 if [ -z "$BOT_PID" ]; then
   log "no bot pid (file missing or pid dead) — starting"
   start_bot
-  REASON=$(read_and_clear_reason)
-  if [ -n "$REASON" ]; then
-    notify_admin "🔄 Bot restarted: ${REASON} · respawned by ${WATCHDOG_NAME} · $(date '+%H:%M %Z')"
-  else
+  # If the bot left a $RESTART_REASON_FILE (e.g. /restart in Telegram or
+  # POST /restart from an external monitor), the new bot will DM admins
+  # itself once it boots. We stay silent in that case to avoid double-DMs.
+  # Only DM ourselves when the bot crashed without leaving a reason.
+  if [ ! -f "$RESTART_REASON_FILE" ]; then
     notify_admin "⚠️ Bot crashed (no process running) · respawned by ${WATCHDOG_NAME} · $(date '+%H:%M %Z')"
   fi
   exit 0
@@ -162,7 +155,9 @@ if [ ! -f "$HEARTBEAT_FILE" ]; then
   log "heartbeat missing (pid: $BOT_PID) — restarting"
   kill_bot "$BOT_PID"
   start_bot
-  notify_admin "🔄 Bot was running but heartbeat file was missing (likely hung mid-startup) · killed + restarted by ${WATCHDOG_NAME} · $(date '+%H:%M %Z')"
+  if [ ! -f "$RESTART_REASON_FILE" ]; then
+    notify_admin "🔄 Bot was running but heartbeat file was missing (likely hung mid-startup) · killed + restarted by ${WATCHDOG_NAME} · $(date '+%H:%M %Z')"
+  fi
   exit 0
 fi
 
@@ -170,4 +165,6 @@ AGE_S=$((AGE_MS / 1000))
 log "heartbeat stale (age=${AGE_MS}ms, threshold=${THRESHOLD_MS}ms, pid: $BOT_PID) — restarting"
 kill_bot "$BOT_PID"
 start_bot
-notify_admin "🔄 Bot was hung (heartbeat ${AGE_S}s stale, threshold ${HEARTBEAT_STALE_SECONDS}s) · killed + restarted by ${WATCHDOG_NAME} · $(date '+%H:%M %Z')"
+if [ ! -f "$RESTART_REASON_FILE" ]; then
+  notify_admin "🔄 Bot was hung (heartbeat ${AGE_S}s stale, threshold ${HEARTBEAT_STALE_SECONDS}s) · killed + restarted by ${WATCHDOG_NAME} · $(date '+%H:%M %Z')"
+fi

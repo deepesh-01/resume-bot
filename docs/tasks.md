@@ -1269,3 +1269,25 @@ If quality lifts noticeably, no need for lever (c). If it doesn't move (or moves
 - [ ] Non-admin chat sending `/userstatus 1089113785` gets no reply (silent ignore, same pattern as `/users`).
 - [ ] `/users` (admin) renders an inline keyboard with one `📊 …` button per allowed + blocked user. Tapping a button fires the `userstatus:` callback and posts the report as a fresh message.
 - [ ] Telegram autocomplete in admin chat shows `userstatus` after typing `/`. In a non-admin chat, autocomplete does NOT show it.
+
+---
+
+# Build Step RestartAttribution-BugFix — Move post-restart DM into the bot's boot path (ADR-029)
+
+*ADR-025 put the post-restart DM logic in the watchdog: after a /restart, the watchdog read + deleted `~/bot/.restart-reason` and DMed admins. Caught the failure mode in production: a sibling supervisor (job-intake's `python -m web.server`) beat the watchdog to spawn a new bot, watchdog's race-cleanup deleted the reason file silently, no DM. Fix: the bot itself reads + deletes the file on boot and DMs admins. The watchdog stays silent when a reason file exists.*
+
+## RA.1 — Bot reads + DMs on boot (10 min)
+- New helper in `src/index.ts` `announceRestartAfterRespawn()`. Reads `RESTART_REASON_FILE`, deletes the file, DMs `config.ADMIN_CHAT_IDS` with `🔄 Bot back online — <reason> · HH:MM TZ`. Delete-before-DM so a partial DM failure can't loop on the same reason.
+- `formatTime()` helper mirrors the watchdog's `date '+%H:%M %Z'` so DM timestamps look the same regardless of emitter.
+- Called as `void announceRestartAfterRespawn()` at boot, in parallel with `bot.start()` (the call is just `bot.api.sendMessage` HTTP, no polling dependency).
+
+## RA.2 — Watchdog drops reason-file handling (5 min)
+- Delete `read_and_clear_reason()` function entirely.
+- Healthy-path race-cleanup line `[ -f "$RESTART_REASON_FILE" ] && rm -f "$RESTART_REASON_FILE"` removed — that was the actual bug.
+- Spawn-path and hung-restart-path DMs gated by `[ ! -f "$RESTART_REASON_FILE" ]` — watchdog stays silent when the bot will speak for itself.
+
+## RA.3 — Smoke checklist
+- [ ] Stop the bot, manually `echo "Telegram /restart by @smoke" > ~/bot/.restart-reason`, start the bot. Reason file disappears within ~5s of boot, admins receive `🔄 Bot back online — Telegram /restart by @smoke · …`. Confirms RA.1.
+- [ ] `kill -9 $(cat ~/bot/.bot.pid)` (no reason file present). Watchdog's next tick spawns a new bot AND DMs `⚠️ Bot crashed (no process running) · respawned by resume-builder watchdog · …`. Bot boots, no reason file, no second DM. 1 DM total.
+- [ ] `/restart` from Telegram (the original failure case). Even if a sibling supervisor (job-intake's web.server, manual `npm start`) beats the watchdog to spawn a new bot, admins still get exactly one DM `🔄 Bot back online — Telegram /restart by @<you> · …`.
+- [ ] `~/bot/logs/watchdog.log` after a /restart shows no `started; new pid:` entry IF a sibling beat the watchdog (consistent with the watchdog's correct "I see a healthy bot" behavior). The bot's `~/bot/logs/$(date +%Y-%m-%d).log` shows the `event: "restart_announced"` log line on the new bot's boot.
