@@ -147,7 +147,7 @@ This layering is **why split pastes work cleanly**: layer 5 opens a buffer; subs
 | `/revoke CHAT_ID` | Remove from allowed_users + archive their active jobs + DM |
 | `/block CHAT_ID [reason...]` | Same as revoke + adds to blocked_users + DM with the block notice |
 | `/unblock CHAT_ID` | Remove from blocked_users (does NOT re-grant; they need to /start again) |
-| `/restart` | Graceful self-restart (writes `.restart-reason` → SIGINT → watchdog respawns within ~2 min and DMs admins). Equivalent to `POST /restart` from inside Telegram. |
+| `/restart` | Graceful self-restart with confirmation prompt (`[✅ Yes, restart] [❌ Cancel]`). Shows in-flight job count on the prompt so the admin sees the cost. On confirm, writes `.restart-reason` → SIGINT → marks any `status='generating'` jobs as `'interrupted'`. After respawn, the bot DMs admins (`🔄 Bot back online — Telegram /restart by @user`) and DMs each affected user (`⚠️ Your last job was interrupted by an admin restart of the bot. Please retry…`) and flips their rows to `'failed'`. Equivalent to `POST /restart` from inside Telegram. |
 | `/userstatus CHAT_ID` | Drill into one user: identity, allow/block state, jobs total + recent 5, all-time/7d/24h spend, 7d breakdown by call type, last claude call. `/users` renders a tappable button per row that fires this. |
 
 ### Headless CLI (System B integration, ADR-021)
@@ -178,6 +178,7 @@ alongside bot-created jobs.
 - After `/reupload` (post-onboarding) or `/reonboard` confirmation: tap [✅ Yes ...] / [❌ Cancel]
 - After friend onboarding admin notification: tap [✅ Approve · 7 days] / [❌ Reject]
 - After `/users` (admin): tap any [📊 @user] button to fire the `userstatus:<chat_id>` callback — same content as `/userstatus CHAT_ID`
+- After `/restart` (admin): tap [✅ Yes, restart] / [❌ Cancel]. Yes fires the `restart:confirm` callback (writes reason file → SIGINT → respawn → bot DMs admins back-online + DMs affected users about interrupted jobs)
 
 ---
 
@@ -195,7 +196,7 @@ alongside bot-created jobs.
 3. **Critic pass** (lever A, type D): claude reads files, scores 0-100, lists gaps + violations, JSON output
 4. **Refinement** (type E, --resume): only if (score < QUALITY_THRESHOLD OR violations exist) AND (gaps OR violations are non-empty) — i.e. a low score with no actionable gaps/violations does NOT trigger a refinement pass; applies critic's gap+violation list to resume.md
 5. **Render**: pandoc → resume_body.typ, copy templates/resume.typ → resume.typ, typst compile → final.pdf
-6. **Reply**: PDF doc + caption "v1 ready. {summary} · 🎯 {score}/100 (refined)" + follow-up message with attribute scores, gaps addressed, claims removed
+6. **Reply**: PDF doc + caption `v1 ready. {summary}\n\n🎯 Quality: {score}/100 (refined)` (the score line is omitted entirely if critic skipped) + follow-up message with attribute scores, gaps addressed, claims removed
 
 Total time: ~2-3 min per job. Cost: ~$0.70-1.00.
 
@@ -261,7 +262,7 @@ The critic is **read-only** (`--allowedTools Read`) and outputs structured JSON:
 ```
 
 **What good looks like (in the bot's chat output):**
-- Score in caption: `🎯 88/100 (refined)`
+- Score line in caption (after a `\n\n` separator): `🎯 Quality: 88/100 (refined)`
 - Follow-up message with attribute breakdown (e.g. "Customer onboarding & tenant lifecycle automation: 10/10")
 - Gaps addressed list (only when refinement ran)
 - Unsupported claims removed list (rule #2 violations the agent invented and the refinement scrubbed out)

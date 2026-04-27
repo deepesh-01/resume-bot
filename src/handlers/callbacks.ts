@@ -4,6 +4,7 @@ import { disambiguateCallback } from './disambiguate.js'
 import { reuploadCallback, reonboardCallback } from './resetActions.js'
 import { resetJobCallback } from './resetJob.js'
 import { userStatusCallback } from './userStatus.js'
+import { restartCallback } from './restart.js'
 
 // Single dispatcher so we don't have two `bot.on('callback_query:data', ...)`
 // handlers fighting over which calls next().
@@ -33,6 +34,10 @@ export const callbackRouter = async (ctx: BotContext): Promise<void> => {
   }
   if (data.startsWith('userstatus:')) {
     await userStatusCallback(ctx)
+    return
+  }
+  if (data.startsWith('restart:')) {
+    await restartCallback(ctx)
     return
   }
 

@@ -448,6 +448,46 @@ const _archiveActiveJobs = db.prepare(
 export const archiveActiveJobsForChat = (chat_id: number): number =>
   _archiveActiveJobs.run(chat_id).changes
 
+// ----- restart-time interrupted-job handling (ADR-030) -----
+
+// Called from the shutdown handler so a /restart marks in-flight jobs
+// before the process exits. The boot path picks them up and DMs the user.
+const _markGeneratingAsInterrupted = db.prepare(
+  `UPDATE jobs SET status='interrupted', last_active_at=datetime('now')
+    WHERE status='generating'`,
+)
+export const markGeneratingAsInterrupted = (): number =>
+  _markGeneratingAsInterrupted.run().changes
+
+// On boot we need to find users whose jobs we should DM about. Includes
+// rows still stuck in 'generating' (kill -9 path — shutdown handler never
+// got to mark them) AND rows we marked 'interrupted' on a graceful exit.
+// Restricts to last 24h so we don't DM about jobs the user has long
+// forgotten if the bot was offline for days.
+export interface InterruptedJobsByChatRow {
+  chat_id: number
+  n: number
+}
+const _interruptedRecent = db.prepare<[], InterruptedJobsByChatRow>(
+  `SELECT chat_id, COUNT(*) AS n
+     FROM jobs
+    WHERE status IN ('interrupted', 'generating')
+      AND created_at >= datetime('now', '-24 hours')
+    GROUP BY chat_id`,
+)
+export const listRecentInterruptedJobsByChat =
+  (): InterruptedJobsByChatRow[] => _interruptedRecent.all()
+
+// Bulk-flip everything to 'failed' regardless of age — no point leaving
+// rows in transient states. Affects rows the boot DM scan covered AND any
+// older 'generating'/'interrupted' rows that fell outside the 24h window.
+const _flushInterruptedToFailed = db.prepare(
+  `UPDATE jobs SET status='failed', last_active_at=datetime('now')
+    WHERE status IN ('interrupted', 'generating')`,
+)
+export const flushInterruptedToFailed = (): number =>
+  _flushInterruptedToFailed.run().changes
+
 export const closeDb = (): void => {
   db.close()
 }

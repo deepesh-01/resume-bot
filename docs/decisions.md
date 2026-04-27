@@ -609,4 +609,42 @@ The architectural mistake: **post-restart attribution belongs to the BOT, not th
 
 ---
 
+## ADR-030 · `/restart` confirmation flow + interrupted-job cleanup
+**Date:** 2026-04-27 · **Status:** Accepted
+
+**Context.** ADR-025 shipped `/restart` as a one-shot admin command: type the slash, the bot replies "♻️ Restarting now…" and 500ms later the process is gone. That was fine for the first day of the system but two things became obvious in use:
+
+1. **One mis-tap and the bot is down** — `/restart` is right next to `/reset` in autocomplete, and admins drilling through `/users` → `/userstatus` → other admin commands can fat-finger it. There was no "are you sure" between the tap and the kill.
+2. **Friends' in-flight jobs vanish silently.** Jobs run inside `runJob`/`runEdit` wrapped by an in-memory `Map<chat_id, Promise>` mutex (`src/mutex.ts`). On SIGINT, the shutdown handler awaits `bot.stop()` (Telegram polling teardown) but does NOT await the in-flight job promises. The child claude/pandoc/typst processes get SIGHUP'd, the catch block that would mark the job `'failed'` never runs, and the `jobs.status` row sits at `'generating'` forever. The friend gets no error reply, no PDF, nothing. A `/restart` while a job is generating = data loss for that friend.
+
+**Decision.** Two interlocking changes:
+
+**Confirmation flow (a).** `/restart` no longer fires immediately. It replies with an inline keyboard:
+- `[✅ Yes, restart]` → callback `restart:confirm` runs the existing reason-write + SIGINT logic.
+- `[❌ Cancel]` → callback `restart:cancel` edits the message to "Restart canceled." and bails.
+
+If any rows are currently in `status='generating'` when the prompt is built, the message body includes a count: `⚠️ N jobs are currently generating — they will be interrupted. Affected users will get a DM after the bot is back online.` The admin sees the cost of confirming.
+
+**Interrupted-job cleanup (b).** Three pieces:
+1. **Shutdown handler** (`src/index.ts`): before `closeDb()`, run `UPDATE jobs SET status='interrupted', last_active_at=now() WHERE status='generating'`. This is the graceful path — every `/restart` and every SIGTERM runs through here.
+2. **Boot path** (`src/index.ts` `notifyInterruptedUsers`): scan `WHERE status IN ('interrupted', 'generating') AND created_at >= now()-24h GROUP BY chat_id`. For each chat, DM `⚠️ Your last job was interrupted by an admin restart of the bot. Please retry…` (singular/plural-aware). Then bulk-flip everything (any age) to `'failed'`.
+3. The 24h window on the DM scan exists so a long-offline bot doesn't spam users about jobs they've forgotten. The unbounded flip is for DB hygiene — no rows are left in transient states.
+
+The boot path is also why `'generating'` (not just `'interrupted'`) is in the scan: a `kill -9` skips the shutdown handler entirely, so those rows stay `'generating'` and have to be cleaned up by the next boot.
+
+**Reasoning.**
+- The confirmation flow follows the existing two-step pattern from `/reset JOB_ID` and `/reonboard` (both confirmed via inline keyboard for the same "destructive, easy to mis-tap" reason).
+- A real persistent job queue (resume the killed claude session via `session_id`) was considered and deferred — it's a 3-4 hour change with its own ADR-worth of tradeoffs around session-id staleness, idempotent-resume semantics, and how to behave when the JD or base resume changed between attempts. Marking interrupted jobs as `'failed'` and asking the user to retry is the simpler honest answer for a personal-scale system.
+- "Please retry" rather than "we'll retry for you" mirrors the design's general philosophy: never silently invent state on the user's behalf. Same reason the bot doesn't invent claims in resumes (ADR-007 / lever A).
+- Friends who DM with `/start` but aren't yet onboarded will receive the DM only if their job actually ran (which requires onboarding to have completed at least once). Pre-onboarding spam isn't a concern.
+
+**Consequence.**
+- `src/handlers/restart.ts` becomes two-handlers — `restartHandler` (slash) builds the prompt, `restartCallback` (button) runs the actual restart. `restart:` prefix routed via `callbackRouter` per project convention.
+- New DB helpers in `src/db.ts`: `markGeneratingAsInterrupted()`, `listRecentInterruptedJobsByChat()`, `flushInterruptedToFailed()`. All three are prepared statements, called from `src/index.ts`.
+- `jobs.status` gains a transient value `'interrupted'` (no schema change — the column has always been free-form `TEXT`). It exists for ~50ms between shutdown and the next boot's flip-to-`'failed'`. `/jobs` and `/userstatus` will never show it in practice.
+- Friends affected by a `/restart` get one DM apiece with a count, regardless of how many jobs they had in flight (typically one — the per-user mutex means same-chat requests serialize).
+- Older `'generating'` rows from this commit's deployment moment (e.g. anything that crashed before the migration) get cleaned up on the first boot of the new code.
+
+---
+
 *New decisions append below this line.*

@@ -2,7 +2,12 @@
 import fs from 'node:fs/promises'
 import { config } from './config.js'
 import { logger } from './logger.js'
-import { closeDb } from './db.js'
+import {
+  closeDb,
+  markGeneratingAsInterrupted,
+  listRecentInterruptedJobsByChat,
+  flushInterruptedToFailed,
+} from './db.js'
 import { bot } from './bot.js'
 import { startArchiveCron, stopArchiveCron } from './archiveCron.js'
 import {
@@ -86,6 +91,21 @@ const shutdown = async (signal: string): Promise<void> => {
   } catch (err) {
     logger.warn({ err }, 'bot.stop() failed')
   }
+  // Mark any in-flight job rows as 'interrupted' before the DB closes.
+  // The next bot to boot reads this state, DMs the affected users, then
+  // flips the rows to 'failed'. Without this, /restart silently drops
+  // friends' jobs and leaves zombie 'generating' rows in the DB (ADR-030).
+  try {
+    const n = markGeneratingAsInterrupted()
+    if (n > 0) {
+      logger.info(
+        { event: 'shutdown_interrupted_jobs', count: n },
+        'marked generating jobs as interrupted',
+      )
+    }
+  } catch (err) {
+    logger.warn({ err: String(err) }, 'mark-interrupted on shutdown failed')
+  }
   closeDb()
   process.exit(0)
 }
@@ -105,6 +125,64 @@ const formatTime = (): string => {
       .formatToParts(d)
       .find((p) => p.type === 'timeZoneName')?.value ?? ''
   return tz ? `${hh}:${mm} ${tz}` : `${hh}:${mm}`
+}
+
+// On boot, find users whose jobs were interrupted by the previous shutdown
+// (or by a kill -9 — graceful-shutdown rows are 'interrupted', killed
+// rows are still 'generating'). DM each user once with a count, then
+// bulk-flip everything to 'failed' so the rows don't sit in a transient
+// state. Limited to last-24h jobs so a long-offline bot doesn't DM users
+// about jobs they've forgotten (ADR-030).
+const notifyInterruptedUsers = async (): Promise<void> => {
+  let rows: ReturnType<typeof listRecentInterruptedJobsByChat>
+  try {
+    rows = listRecentInterruptedJobsByChat()
+  } catch (err) {
+    logger.warn({ err: String(err) }, 'interrupted-jobs scan failed on boot')
+    return
+  }
+  if (rows.length === 0) {
+    // Still flush any stale older rows (>24h) so the DB is clean.
+    try {
+      flushInterruptedToFailed()
+    } catch {
+      /* ignore */
+    }
+    return
+  }
+
+  for (const row of rows) {
+    const msg =
+      row.n === 1
+        ? '⚠️ Your last job was interrupted by an admin restart of the bot. Please retry — paste the JD or send the URL again.'
+        : `⚠️ ${row.n} of your recent jobs were interrupted by an admin restart of the bot. Please retry them.`
+    try {
+      await bot.api.sendMessage(row.chat_id, msg)
+    } catch (err) {
+      logger.warn(
+        { err: String(err), chat_id: row.chat_id, n: row.n },
+        'interrupted-jobs DM failed',
+      )
+    }
+  }
+
+  // Flip ALL ('interrupted' + 'generating', any age) to 'failed' so the DB
+  // is left in a consistent state. Counts include rows we DMed about plus
+  // any that fell outside the 24h DM window.
+  try {
+    const flipped = flushInterruptedToFailed()
+    logger.info(
+      {
+        event: 'interrupted_jobs_handled',
+        users_dmed: rows.length,
+        rows_dmed: rows.reduce((s: number, r) => s + r.n, 0),
+        rows_flipped_total: flipped,
+      },
+      'notified affected users about interrupted jobs',
+    )
+  } catch (err) {
+    logger.warn({ err: String(err) }, 'flush-interrupted-to-failed failed')
+  }
 }
 
 // Read + delete ~/bot/.restart-reason on boot and DM admins with the
@@ -180,6 +258,7 @@ startHeartbeat()
 startHealthServer()
 void registerCommandMenus()
 void announceRestartAfterRespawn()
+void notifyInterruptedUsers()
 
 bot.start({
   onStart: () => {

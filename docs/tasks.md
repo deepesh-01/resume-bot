@@ -1291,3 +1291,34 @@ If quality lifts noticeably, no need for lever (c). If it doesn't move (or moves
 - [ ] `kill -9 $(cat ~/bot/.bot.pid)` (no reason file present). Watchdog's next tick spawns a new bot AND DMs `⚠️ Bot crashed (no process running) · respawned by resume-builder watchdog · …`. Bot boots, no reason file, no second DM. 1 DM total.
 - [ ] `/restart` from Telegram (the original failure case). Even if a sibling supervisor (job-intake's web.server, manual `npm start`) beats the watchdog to spawn a new bot, admins still get exactly one DM `🔄 Bot back online — Telegram /restart by @<you> · …`.
 - [ ] `~/bot/logs/watchdog.log` after a /restart shows no `started; new pid:` entry IF a sibling beat the watchdog (consistent with the watchdog's correct "I see a healthy bot" behavior). The bot's `~/bot/logs/$(date +%Y-%m-%d).log` shows the `event: "restart_announced"` log line on the new bot's boot.
+
+---
+
+# Build Step Restart-UX — confirmation flow + interrupted-job cleanup (ADR-030)
+
+*ADR-025's `/restart` was a one-shot fire — easy to mis-tap, and any job currently in `status='generating'` evaporated silently because the shutdown handler doesn't await in-flight `runJob` promises. Add a two-step confirm prompt with active-job count, mark in-flight rows as `'interrupted'` on shutdown, and on the next boot DM affected users so they know to retry.*
+
+## RU.1 — `/restart` confirmation flow (15 min)
+- `src/handlers/restart.ts` becomes two handlers:
+  - `restartHandler` (slash): query `COUNT(*) FROM jobs WHERE status='generating'`, reply with inline keyboard `[✅ Yes, restart] [❌ Cancel]`. If count > 0, message body includes `⚠️ N jobs are currently generating — they will be interrupted. Affected users will get a DM after the bot is back online.`
+  - `restartCallback` (button): `restart:confirm` runs the existing reason-write + SIGINT logic; `restart:cancel` edits to "Restart canceled" and bails. Per project convention, callback routed via `callbackRouter` `restart:` prefix in `src/handlers/callbacks.ts`.
+
+## RU.2 — Mark in-flight jobs on shutdown (5 min)
+- New DB helper `markGeneratingAsInterrupted()` in `src/db.ts`: `UPDATE jobs SET status='interrupted', last_active_at=now() WHERE status='generating'`.
+- Called from `src/index.ts` shutdown handler before `closeDb()` (only after `bot.stop()` so we don't race a still-active runJob writing to the same row).
+
+## RU.3 — Boot-time DM + cleanup (15 min)
+- New DB helpers `listRecentInterruptedJobsByChat()` and `flushInterruptedToFailed()` in `src/db.ts`.
+- New `notifyInterruptedUsers()` in `src/index.ts` runs at boot in parallel with `bot.start`:
+  - Scan `WHERE status IN ('interrupted','generating') AND created_at >= now()-24h GROUP BY chat_id`.
+  - Per chat, DM (singular/plural-aware): `⚠️ Your last job was interrupted by an admin restart of the bot. Please retry…`
+  - Then `UPDATE jobs SET status='failed' WHERE status IN ('interrupted','generating')` (any age — DB hygiene).
+- The boot scan deliberately includes `'generating'` not just `'interrupted'` so a `kill -9` (which skips the shutdown handler) is also cleaned up.
+
+## RU.4 — Smoke checklist
+- [ ] `/restart` (admin, no active jobs) → reply `♻️ Restart the bot? [✅ Yes, restart] [❌ Cancel]`. Tap Cancel → message edits to "❌ Restart canceled." Bot does NOT restart.
+- [ ] `/restart` while ≥1 job is in `status='generating'` → prompt body includes `⚠️ N jobs are currently generating …`. Admin sees the warning before tapping confirm.
+- [ ] Tap [✅ Yes, restart] → message edits to "♻️ Restarting now. Back online in ~10-15s — you'll get a DM." Bot exits gracefully via SIGINT, port 8787 fully released, watchdog respawns within ~2 min OR sibling supervisor beats the watchdog (either is fine — ADR-029 makes the post-restart DM survive the race).
+- [ ] After respawn, admin gets `🔄 Bot back online — Telegram /restart by @user · …` (from ADR-029). Each affected user gets one DM about their interrupted jobs.
+- [ ] Smoke-test (b) with a kill -9: `kill -9 $(cat ~/bot/.bot.pid)` (status='generating' rows survive in DB). Watchdog respawns. Boot scan picks up `'generating'` rows and DMs users — even though shutdown handler never ran. Confirms the fallback path.
+- [ ] After boot scan, all rows previously in `'generating'`/`'interrupted'` are now `'failed'`. `sqlite3 ~/bot/db.sqlite "SELECT status, COUNT(*) FROM jobs GROUP BY status"` shows zero `'interrupted'`, zero `'generating'` (modulo any job started since boot).
