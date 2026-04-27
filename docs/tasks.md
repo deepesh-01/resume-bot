@@ -1322,3 +1322,44 @@ If quality lifts noticeably, no need for lever (c). If it doesn't move (or moves
 - [ ] After respawn, admin gets `🔄 Bot back online — Telegram /restart by @user · …` (from ADR-029). Each affected user gets one DM about their interrupted jobs.
 - [ ] Smoke-test (b) with a kill -9: `kill -9 $(cat ~/bot/.bot.pid)` (status='generating' rows survive in DB). Watchdog respawns. Boot scan picks up `'generating'` rows and DMs users — even though shutdown handler never ran. Confirms the fallback path.
 - [ ] After boot scan, all rows previously in `'generating'`/`'interrupted'` are now `'failed'`. `sqlite3 ~/bot/db.sqlite "SELECT status, COUNT(*) FROM jobs GROUP BY status"` shows zero `'interrupted'`, zero `'generating'` (modulo any job started since boot).
+
+---
+
+# Build Step Sysstatus-Preflight — boot preflight + always-on file logging + failure-streak alert + /sysstatus (ADR-031)
+
+*Hours after the previous shipping push, every Telegram-side job silently failed with `spawn claude ENOENT`. Bot was responding, watchdog said healthy, /healthz returned 200, daily log file didn't exist. RCA: sibling job-intake's web.server spawned the bot with a stripped PATH, AND dev-mode pino was writing to stdout (which web.server captured into its own log file) instead of the expected `~/bot/logs/$(date +%Y-%m-%d).log`. No layer caught the degradation because the watchdog only checks heartbeat freshness. Fix in four parts: (1) PATH augmentation at boot, (2) always-on daily-file logging, (3) failure-streak alert, (4) /sysstatus human-layer command.*
+
+## SP.1 — Boot preflight (`src/preflight.ts`) (15 min)
+- `augmentPath()` prepends `~/.local/bin`, `~/.local/share/fnm/aliases/default/bin`, `/opt/homebrew/bin`, `/usr/local/bin` to `process.env.PATH`. Idempotent — order-preserving dedup.
+- `runPreflight()` runs `command -v claude`, `command -v pandoc`, `command -v typst` and `<cmd> --version` for each.
+- On success: `event: 'preflight_ok'` log with resolved paths + version lines.
+- On failure: `level: fatal, event: 'preflight_failed'` AND `dmAdminsIfPreflightFailed()` posts a single DM to admins with which CLI is missing and the augmented PATH so the supervisor that mis-configured them can be identified.
+- Called as the FIRST thing in `src/index.ts` (before middleware, handlers, bot.start). Bot keeps booting even on failure so admins can still drill in via /sysstatus.
+
+## SP.2 — Always-on file logging (`src/logger.ts`) (5 min)
+- Dev mode now uses a `transport.targets` array: `pino-pretty` to stdout AND `pino/file` to `LOG_DIR/YYYY-MM-DD.log` (mkdir true).
+- Prod mode unchanged — `pino.destination` to the same file.
+- Invariant: `~/bot/logs/$(date -u +%Y-%m-%d).log` exists and is being written to as long as the bot is running, regardless of who owns the bot's stdout.
+
+## SP.3 — Failure-streak alert (`src/failureStreak.ts`) (15 min)
+- Threshold: ≥3 of the last 5 jobs (across all chats) failed within the last 1h.
+- Cooldown: 30 min, persisted to `~/bot/.failure-streak-alert.json`.
+- Called from `runJob`/`runEdit` `finally` blocks (alongside the existing `checkAndAlertIfOver80` budget check).
+- DM body includes a sample of the failed `job_id`s and the most recent failed row's chat_id + timestamp, plus a hint pointing at `/sysstatus` for diagnosis.
+- Does NOT crash the bot or fail the user-facing reply; pure side-channel observability.
+
+## SP.4 — /sysstatus admin command (`src/handlers/sysstatus.ts`) (20 min)
+- Single-message HTML reply with five sections:
+  - **Runtime:** pid, uptime, NODE_ENV, today's daily log file (✅/❌ + size), heartbeat age vs 180s threshold.
+  - **Binaries:** claude/pandoc/typst resolved path + first version line OR ❌ "not on PATH".
+  - **Workers:** watchdog last-log mtime ("3m ago"), backup last-log mtime + tarball count on disk.
+  - **Jobs (24h):** count grouped by status with status emoji (🟢 ready, ⚪️ archived, 🔴 failed, 🟡 generating, 🟠 interrupted); recent 5 failed jobs.
+  - **Disk:** users / logs / backups / archive footprint via `du -sk`.
+- Registered in `src/index.ts` (`bot.command('sysstatus', sysstatusHandler)`), added to `ADMIN_COMMAND_MENU`, allowlisted in `ONBOARDING_COMMANDS`.
+
+## SP.5 — Smoke checklist
+- [ ] Bot startup log shows `event: "preflight_ok"` with `claude_version: "2.x.y (Claude Code)"`. If `event: "preflight_failed"`, admin chat has a `🚨 Bot booted in a degraded state` DM with the broken PATH.
+- [ ] `~/bot/logs/$(date -u +%Y-%m-%d).log` exists, is being written to (`tail -f` shows JSON lines), even when the bot is started by a parent process that captures stdout (test by running `npm start > /tmp/cap.log 2>&1 &` and confirming the daily file still grows).
+- [ ] `/sysstatus` (admin) returns the five-section snapshot. Each section renders correctly with at least one emoji marker. Run on a healthy bot → no ❌. Run after `mv ~/.local/bin/claude /tmp/`-style break → `claude: ❌ not on PATH` line shows up.
+- [ ] Failure-streak smoke: temporarily break claude (`mv ~/.local/bin/claude /tmp/claude.bak`), have a friend send 3+ JDs in quick succession, all fail. Within seconds of the 3rd failure, admins get `🚨 Failure streak detected` DM. Restore claude. 30 min later, the same scenario alerts again (cooldown lapsed).
+- [ ] `/sysstatus` "today's log" shows ✅ + nonzero size after running the bot through stdout-capturing parent (`web.server`, `nohup ... > /dev/null`, etc.).

@@ -13,6 +13,7 @@ const ONBOARDING_COMMANDS = new Set([
   'context',
   'restart',
   'userstatus',
+  'sysstatus',
 ])
 
 // §13.9 edge case: "Non-file message before onboarded=1 → resend onboarding prompt."

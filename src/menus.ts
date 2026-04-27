@@ -33,4 +33,5 @@ export const ADMIN_COMMAND_MENU: ReadonlyArray<{
   { command: 'unblock', description: 'unblock a user: /unblock chat_id' },
   { command: 'restart', description: 'restart the bot via watchdog' },
   { command: 'userstatus', description: 'drill into a user: /userstatus chat_id' },
+  { command: 'sysstatus', description: 'system health snapshot' },
 ]

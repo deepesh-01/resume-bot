@@ -647,4 +647,52 @@ The boot path is also why `'generating'` (not just `'interrupted'`) is in the sc
 
 ---
 
+## ADR-031 · Boot preflight + always-on file logging + failure-streak alert + /sysstatus
+**Date:** 2026-04-28 · **Status:** Accepted
+
+**Context — the incident.** Roughly 11 hours after the watchdog work shipped, every Telegram-side job started failing with `Error: spawn claude ENOENT`. The bot was responding (Telegram polling, /commands, /users, /healthz all OK), the watchdog reported `last exit code = 0`, the heartbeat was fresh — every monitoring layer said "healthy." A friend pasting a JD, however, got `claudeFailed`. The only place the actual error was visible was inside `~/bot/logs/watchdog-jobintake.log` — a sibling project's log file.
+
+**Root cause chain (two compounding bugs):**
+
+1. **The bot was started by sibling `job-intake/web.server`, not by our watchdog.** Process tree: `bot ← npm start ← python -m web.server ← uv run python ← launchd`. `web.server`'s inherited PATH was launchd's stripped default `/usr/bin:/bin:/usr/sbin:/sbin` — no `~/.local/bin`, no `/opt/homebrew/bin`, no `claude`. Every job's `spawn('claude', …)` returned ENOENT.
+
+2. **The bot's structured logs were going to the wrong file.** `src/logger.ts` wrote to a daily file *only* when `NODE_ENV=production`. In dev (our case) it wrote to stdout via `pino-pretty`. `web.server` captured the bot's stdout into its own log. Result: `~/bot/logs/2026-04-XX.log` was never created, and the ENOENT errors were buried inside `watchdog-jobintake.log`. Anyone tailing the expected daily log file saw nothing.
+
+3. **No alarm caught the degraded state.** The watchdog's only signal is "process alive + heartbeat fresh." It can't know that every job inside the running process is failing. `/healthz` only checks the heartbeat file. There was no automated layer that said "jobs are failing" — and no obvious place a human could *look* to find out.
+
+**Decision.** Four interlocking changes:
+
+1. **Boot preflight (`src/preflight.ts`).** At process start, before any handlers register, augment `process.env.PATH` to prepend the standard user-binary dirs (`~/.local/bin`, `~/.local/share/fnm/aliases/default/bin`, `/opt/homebrew/bin`, `/usr/local/bin`) regardless of what the parent supervisor handed us. Then `command -v` for each required CLI (`claude`, `pandoc`, `typst`). On success: log `event: 'preflight_ok'` with resolved paths + versions. On failure: log `level: fatal, event: 'preflight_failed'` AND DM admins immediately so the degraded boot is visible. We deliberately don't refuse to start — admins still need `/sysstatus` to investigate, and a refusing-to-start bot would loop-respawn under the watchdog.
+
+2. **Always-on file logging (`src/logger.ts`).** Pino now writes the daily file in BOTH dev and prod. Dev additionally pretty-prints to stdout via a multi-target transport. The invariant is: as long as the bot is running, `~/bot/logs/YYYY-MM-DD.log` exists and is being written to. Whoever owns stdout no longer determines whether logs are recoverable.
+
+3. **Failure-streak alert (`src/failureStreak.ts`).** Called from `runJob`/`runEdit` `finally` blocks. Queries `SELECT status FROM jobs WHERE created_at >= now()-1h ORDER BY created_at DESC LIMIT 5` — if ≥3 of the last 5 jobs failed, DM admins with the involved `job_id`s and a hint at common causes (claude auth/rate-limit, missing PATH binary, recent code regression). 30-min cooldown via `~/bot/.failure-streak-alert.json` so a real outage doesn't spam. The threshold (3-of-5 within 1h) is calibrated to fire on a real degradation pattern (the ENOENT incident would have tripped it within minutes) without false-positives on isolated failures.
+
+4. **`/sysstatus` admin command (`src/handlers/sysstatus.ts`) — the human layer.** Single-message at-a-glance health snapshot:
+   - **Runtime:** pid, uptime, NODE_ENV, today's daily log file (✅/❌ + size), heartbeat age.
+   - **Binaries:** claude / pandoc / typst — resolved path + version, or ❌ if not on PATH.
+   - **Workers:** watchdog log mtime ("3m ago"), backup log mtime, tarball count.
+   - **Jobs (24h):** count by status with status emoji; recent 5 failed jobs with chat_id + timestamp.
+   - **Disk:** users / logs / backups / archive footprint of `~/bot/`.
+   The point is: an admin worried about the bot can run one command and see every dimension that the watchdog/heartbeat/healthz triple can't reach. The ENOENT incident would have shown up immediately on any of: today's log "❌ missing", binaries "claude ❌", jobs (24h) "🔴 failed: 8".
+
+**Reasoning.**
+- (1) is the cheap fix for the actual bug. Rather than chase down every supervisor's PATH config (cross-repo, cross-deployment, future supervisors we don't know about), we make the bot self-sufficient at process start. The augmentation prepends, so user-installed binaries shadow system equivalents — the same precedence a normal interactive shell gives.
+- (2) is the lesson the incident taught: **observability shouldn't depend on stdout ownership.** A long-running daemon that's at the mercy of "whoever started me captured my fd 1" is a fragile design. Always-on file logging makes a known path (`~/bot/logs/$(date -u +%Y-%m-%d).log`) the contract.
+- (3) and (4) are deliberately complementary: (3) is reactive — a streak fires a DM without anyone needing to look. (4) is proactive — when a human DOES need to look, there's one command that gives them every signal at once. The two together close the gap between "the watchdog says alive" and "is the bot actually serving."
+- A failure-streak threshold of 3-of-5 within 1h was picked over alternatives (e.g. "every Nth failure" or "any failure"). 3-of-5 catches the ENOENT pattern (5 friends get instant `claudeFailed`) without tripping on a single LinkedIn auth-wall scrape that legitimately fails one job. The 1h window keeps a long-tail of failed jobs from yesterday from leaving the alarm in a permanently-tripped state today.
+
+**Consequence.**
+- New modules: `src/preflight.ts`, `src/failureStreak.ts`, `src/handlers/sysstatus.ts`.
+- `src/logger.ts`: dev mode now uses a `targets` array — one pino-pretty stdout target, one pino/file daily-log target.
+- New runtime files: `~/bot/.failure-streak-alert.json` (single small JSON object, written when an alert fires; cooldown state).
+- New env vars: none (preflight is unconditional; failure-streak threshold is hardcoded in `src/failureStreak.ts`; `/sysstatus` reads existing config).
+- `/sysstatus` registered in `src/index.ts`, added to `ADMIN_COMMAND_MENU` in `src/menus.ts` (so it shows in admin-chat autocomplete only), added to `ONBOARDING_COMMANDS` in `src/middleware/preOnboarding.ts`.
+- Bot startup logs gain `event: 'preflight_ok'` with resolved CLI paths and versions — a quick post-boot grep confirms the environment is sane.
+- The 8 failed jobs from this incident's window (visible in `~/bot/db.sqlite` `WHERE status='failed' AND created_at >= datetime('now','-24h')`) stay in the DB as historical record of the outage. They were the cost of *not* having (3) and (4); we don't backfill alerts for them.
+
+**Cross-cutting note.** The cooperative-supervisor pattern (our watchdog + sibling project's `web.server` both willing to spawn `npm start`) is reasonable and ADR-029 already made post-restart attribution survive it. ADR-031 extends that posture: **the bot must be self-sufficient at boot regardless of who launched it.** Future contributors adding boot-time prerequisites (e.g. a new CLI dependency, a new env var that must be present) should add to `runPreflight()` rather than assume the supervisor configured anything.
+
+---
+
 *New decisions append below this line.*

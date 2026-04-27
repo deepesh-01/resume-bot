@@ -14,6 +14,7 @@ import {
 } from './db.js'
 import { STRINGS } from './strings.js'
 import { checkAndAlertIfOver80 } from './budget.js'
+import { checkFailureStreak } from './failureStreak.js'
 import { bot } from './bot.js'
 
 const mapErrorToString = (err: unknown): string => {
@@ -121,6 +122,7 @@ export const runEditFlow = async (
       // Same one-shot weekly-budget check as runJob; budget tracking
       // disabled by default (CLAUDE_WEEKLY_BUDGET_USD=0).
       void checkAndAlertIfOver80(bot)
+      void checkFailureStreak(bot)
     }
   })
 }

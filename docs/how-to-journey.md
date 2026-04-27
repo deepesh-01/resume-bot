@@ -149,6 +149,7 @@ This layering is **why split pastes work cleanly**: layer 5 opens a buffer; subs
 | `/unblock CHAT_ID` | Remove from blocked_users (does NOT re-grant; they need to /start again) |
 | `/restart` | Graceful self-restart with confirmation prompt (`[✅ Yes, restart] [❌ Cancel]`). Shows in-flight job count on the prompt so the admin sees the cost. On confirm, writes `.restart-reason` → SIGINT → marks any `status='generating'` jobs as `'interrupted'`. After respawn, the bot DMs admins (`🔄 Bot back online — Telegram /restart by @user`) and DMs each affected user (`⚠️ Your last job was interrupted by an admin restart of the bot. Please retry…`) and flips their rows to `'failed'`. Equivalent to `POST /restart` from inside Telegram. |
 | `/userstatus CHAT_ID` | Drill into one user: identity, allow/block state, jobs total + recent 5, all-time/7d/24h spend, 7d breakdown by call type, last claude call. `/users` renders a tappable button per row that fires this. |
+| `/sysstatus` | System health snapshot (the "human layer", ADR-031). pid + uptime + NODE_ENV; today's daily log present + size; heartbeat age; claude/pandoc/typst resolved path + version OR ❌ if missing from PATH; watchdog + backup last-tick mtime; 24h jobs by status with recent failures; disk footprint of `~/bot/`. Run this when the bot looks responsive but feels off. |
 
 ### Headless CLI (System B integration, ADR-021)
 
@@ -296,7 +297,7 @@ The critic is **read-only** (`--allowedTools Read`) and outputs structured JSON:
 │   accessRequest, accessApproval,     │
 │   admin (pending/allow/deny/users    │
 │         /revoke/block/unblock),      │
-│   restart, userStatus,               │
+│   restart, userStatus, sysstatus,    │
 │   resetActions, resetJob,            │
 │   callbacks                          │
 └────────────┬─────────────────────────┘
@@ -336,6 +337,9 @@ The critic is **read-only** (`--allowedTools Read`) and outputs structured JSON:
 - `src/menus.ts` — single source of truth for the Telegram command menu used by `/commands` and `setMyCommands` autocomplete (ADR-025)
 - `src/budget.ts` — rolling-7-day Claude spend tracker with one-shot 80% admin DM (ADR-027)
 - `src/render-base.ts` — headless `npm run render-base -- --chat-id <id>` to refresh `base_resume.pdf` from `base_resume.md` outside the Telegram bot
+- `src/preflight.ts` — boot-time PATH augmentation + claude/pandoc/typst presence check; FATAL log + admin DM on failure (ADR-031)
+- `src/failureStreak.ts` — detects ≥3 of last 5 jobs failing within 1h, DMs admins with cooldown (ADR-031)
+- `src/handlers/sysstatus.ts` — `/sysstatus` admin command, full system health snapshot (ADR-031)
 - `src/textDebounce.ts` — REMOVED (ADR-016 superseded it)
 
 ---
@@ -466,6 +470,7 @@ curl -X POST -H "X-Watchdog-Token: $TOKEN" -H "X-Watchdog-Source: smoke-test" ht
 | `CLAUDE_TIMEOUT` | claude exceeded the per-call hard timeout | Tailor: 5min, edit/refine: 4min, critic: 90s. If recurring, check claude CLI auth + network |
 | `CLAUDE_AUTH` (DMs owner) | claude CLI lost auth | Open a terminal where the bot runs, run `claude` interactively, log back in |
 | `CLAUDE_RATE_LIMIT` | Subscription cap hit | Wait. The bot tells the user to retry in N hours |
+| `spawn claude ENOENT` (bot responding but every job fails) | Bot was launched by a supervisor with a stripped PATH (no `~/.local/bin`); the boot preflight (ADR-031) now extends PATH at process start AND DMs admins if claude is still missing. Run `/sysstatus` to confirm `claude: ❌` and the augmented PATH. Fix the supervisor's PATH or, simpler, restart the bot through `bash scripts/install-watchdog.sh` so the watchdog is the supervisor again. |
 | Job stuck after `render_ok` log | grammY `replyWithDocument` hung — see ADR-012 | Now bounded by 60s timeout. If pre-fix, restart unblocks; PDF is on disk and recoverable via curl |
 | `/save` "patch context mismatch" | base_resume.md changed since the diff was computed | Run `/save` again to regenerate the diff |
 | Telegram "0 KB / X KB" with X icon on a file | Telegram client tap-to-download UI for non-rendered MIME types | Tap to download. PDFs render natively; markdown files don't |

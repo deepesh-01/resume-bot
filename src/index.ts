@@ -1,5 +1,6 @@
 // Boot order matters: env validation -> logger -> db -> bot -> middleware -> handlers.
 import fs from 'node:fs/promises'
+import { runPreflight, dmAdminsIfPreflightFailed } from './preflight.js'
 import { config } from './config.js'
 import { logger } from './logger.js'
 import {
@@ -35,6 +36,7 @@ import { helpHandler } from './handlers/help.js'
 import { commandsHandler } from './handlers/commands.js'
 import { restartHandler } from './handlers/restart.js'
 import { userStatusHandler } from './handlers/userStatus.js'
+import { sysstatusHandler } from './handlers/sysstatus.js'
 import { callbackRouter } from './handlers/callbacks.js'
 import { PUBLIC_COMMAND_MENU, ADMIN_COMMAND_MENU } from './menus.js'
 import {
@@ -72,6 +74,7 @@ bot.command('block', blockHandler)
 bot.command('unblock', unblockHandler)
 bot.command('restart', restartHandler)
 bot.command('userstatus', userStatusHandler)
+bot.command('sysstatus', sysstatusHandler)
 bot.on('callback_query:data', callbackRouter)
 bot.on('message:document', documentHandler)
 bot.on('message:text', jobMessageHandler)
@@ -253,12 +256,18 @@ const registerCommandMenus = async (): Promise<void> => {
   }
 }
 
+// Preflight FIRST, before anything else. We deliberately don't refuse to
+// start when it fails — admins can still tap /sysstatus, /users, etc., and
+// the watchdog won't loop-respawn us. Instead we log FATAL and DM admins.
+const preflightResult = runPreflight()
+
 startArchiveCron()
 startHeartbeat()
 startHealthServer()
 void registerCommandMenus()
 void announceRestartAfterRespawn()
 void notifyInterruptedUsers()
+void dmAdminsIfPreflightFailed(bot, preflightResult)
 
 bot.start({
   onStart: () => {
