@@ -695,4 +695,92 @@ The boot path is also why `'generating'` (not just `'interrupted'`) is in the sc
 
 ---
 
+## ADR-032 · `cli-edit.js` — headless edit/iterate CLI for cross-repo callers
+**Date:** 2026-04-29 · **Status:** Accepted
+
+**Context.** `cli-tailor.js` (ADR-021 in this repo) lets a sibling
+project (job-intake / "System B") trigger a fresh tailor pass headlessly
+by feeding a JD path and chat-id. But job-intake also needed an *edit*
+flow: when the user reviews a tailored resume in their queue and gives
+feedback ("layout's wrong", "bullets shallow", "drifting from JD"), the
+right move is to resume the existing Claude session and apply the
+feedback in-place — NOT regenerate from base, which loses everything
+the prior pass got right.
+
+The capability already existed inside this repo: `runEdit()` in
+`src/claude.ts` invokes `claude --resume <sessionId> -p <instruction>
+--allowedTools Read,Edit,Write` against an existing job workspace. But
+`runEdit()` was only wired up to the Telegram `/edit` command via
+`runEditFlow()` in `src/runEdit.ts`. There was no CLI entry exposing it.
+
+**Decision.** Ship a new headless CLI: `dist/cli-edit.js`. Args:
+
+    node dist/cli-edit.js \
+        --job-slug <slug>      # System B's safe-id (e.g. naukri-all-060326022621)
+        --instruction <text>   # the user's feedback, used as the resume prompt
+        [--output-dir PATH]    # optional copy target (System B's data/tailored/)
+        --output-format json
+
+The CLI:
+1. Looks up the most recent matching job in the SQLite DB:
+   `SELECT * FROM jobs WHERE job_id LIKE '%_<slug>' AND workspace_path
+   IS NOT NULL AND session_id IS NOT NULL ORDER BY created_at DESC LIMIT 1`.
+2. Validates `workspace_path` exists on disk and contains `resume.md`.
+3. Calls `runEdit(workspace_path, session_id, instruction)` — same
+   primitive Telegram `/edit` uses.
+4. Re-renders the PDF via `renderResumePdf(workspace_path)`.
+5. Optionally copies the PDF into `--output-dir` as `<job_id>.pdf`.
+6. Reads `last_change.txt` (if `runEdit`'s prompt populated it) for the
+   summary.
+7. Emits the same JSON shape `cli-tailor.js` does: `{ ok, pdf_path,
+   last_change, error, duration_ms }`.
+
+Specific error codes for the caller's fall-back logic:
+- `EDIT_NO_PRIOR_JOB` — no prior tailor exists for this slug. The caller
+  (System B) treats this as a signal to fall back to `cli-tailor.js`
+  with a feedback-wrapped JD.
+- `EDIT_WORKSPACE_MISSING` / `EDIT_RESUME_MISSING` — the prior workspace
+  was archived or `resume.md` was deleted. Same fallback.
+- `CLAUDE_TIMEOUT` / `CLAUDE_FAILED` — the upstream Claude call failed.
+  Bubbles up; caller marks the row `error`.
+
+**Reasoning.**
+- The CLI is a thin wrapper around `runEdit()`. Zero new logic, fully
+  reuses battle-tested code paths from the Telegram flow.
+- Emitting the same JSON shape as `cli-tailor.js` lets job-intake's
+  `tailor_bridge.py` reuse the existing parser code.
+- Slug-suffix matching (`%_<slug>`) decouples System B's job IDs from
+  System A's date-prefixed ones (`makeJobId` returns `<YYYYMMDD>_<slug>`).
+  Because System B's IDs are source-prefixed (`naukri:ALL:<id>`,
+  `linkedin:ALL:<id>`), suffix collisions are not possible.
+- Putting it in `dist/` (alongside `cli-tailor.js`) keeps both CLIs in
+  one place; the existing `npm run build` (`tsc -p .`) emits both.
+
+**Trade-offs accepted.**
+- This repo now exposes two CLIs, both invoked headlessly from outside.
+  Maintenance cost is minimal — they're thin wrappers — but future
+  contributors adding logic to the runtime (e.g., a new step in
+  `runEdit`) need to remember it'll affect both Telegram and headless
+  callers.
+- The CLI doesn't run the critic/refine pass that `cli-tailor.js` does.
+  Reasoning: the user's explicit feedback is already a stronger signal
+  than a critic's automated review; a critic pass post-edit would risk
+  reverting the user-requested change. Acceptable for the review-loop
+  use case.
+
+**Consequence.** Job-intake's "Re-tailor with feedback" review loop is
+now real iteration on the existing resume rather than a fresh start.
+Cross-repo contract documented:
+- This repo: `dist/cli-edit.js` exists with the args above.
+- Job-intake: `src/tailor_bridge.py::run_edit` knows how to invoke it,
+  `src/processor/runner.py` reads a sidecar JSON to choose between
+  `cli-tailor.js` (fresh) and `cli-edit.js` (iterate). See ADR-026 in
+  job-intake's `docs/decisions.md`.
+
+If a future tailor-pipeline change adds a new pre-edit step (e.g. always
+re-run critic before applying user feedback), bump this ADR and the
+pairing ADR-026.
+
+---
+
 *New decisions append below this line.*

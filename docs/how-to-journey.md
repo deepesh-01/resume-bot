@@ -151,11 +151,14 @@ This layering is **why split pastes work cleanly**: layer 5 opens a buffer; subs
 | `/userstatus CHAT_ID` | Drill into one user: identity, allow/block state, jobs total + recent 5, all-time/7d/24h spend, 7d breakdown by call type, last claude call. `/users` renders a tappable button per row that fires this. |
 | `/sysstatus` | System health snapshot (the "human layer", ADR-031). pid + uptime + NODE_ENV; today's daily log present + size; heartbeat age; claude/pandoc/typst resolved path + version OR ❌ if missing from PATH; watchdog + backup last-tick mtime; 24h jobs by status with recent failures; disk footprint of `~/bot/`. Run this when the bot looks responsive but feels off. |
 
-### Headless CLI (System B integration, ADR-021)
+### Headless CLI (System B integration)
 
-Not a Telegram command — a separate entry point compiled to
-`dist/cli-tailor.js`. Used by the sibling `job-intake` project to
-produce a tailored resume PDF for a JD without going through Telegram.
+Two entry points, both compiled into `dist/`. Used by the sibling
+`job-intake` project to drive the resume pipeline without Telegram.
+
+#### `dist/cli-tailor.js` — fresh tailor (ADR-021)
+
+Tailor a resume from base + a JD path:
 
 ```sh
 node dist/cli-tailor.js \
@@ -166,10 +169,35 @@ node dist/cli-tailor.js \
 ```
 
 Outputs one JSON line on stdout: `{ok, pdf_path, last_change, score,
-refinement_applied, duration_ms, error}`. Reuses the same tailoring +
-critic + refinement pipeline as the bot. Does not write to the SQLite
-DB. Per-job workspace lands in `~/bot/users/<chat_id>/jobs/<job_id>/`
-alongside bot-created jobs.
+refinement_applied, duration_ms, error}`. Runs the full tailoring +
+critic + refinement pipeline. Per-job workspace lands in
+`~/bot/users/<chat_id>/jobs/<job_id>/` alongside bot-created jobs.
+
+#### `dist/cli-edit.js` — iterate on existing tailored resume (ADR-032)
+
+Resumes the prior Claude session and applies a free-text instruction
+(typically the user's review feedback) to the existing `resume.md`
+in place. Used by job-intake's "Re-tailor with feedback" review flow.
+
+```sh
+node dist/cli-edit.js \
+  --job-slug naukri-all-060326022621 \
+  --instruction "Lead with platform-engineering depth and trim the data-eng bullets" \
+  [--output-dir /path/to/copy/pdf/to] \
+  --output-format json
+```
+
+`--job-slug` is System B's safe-id (lowercase, non-alphanumerics →
+`-`). The CLI looks up the most recent matching job in SQLite via
+`SELECT ... FROM jobs WHERE job_id LIKE '%_<slug>' AND workspace_path
+IS NOT NULL AND session_id IS NOT NULL ORDER BY created_at DESC LIMIT 1`.
+Output JSON shape matches `cli-tailor.js`. Specific error codes for
+the caller's fallback logic: `EDIT_NO_PRIOR_JOB`, `EDIT_WORKSPACE_MISSING`,
+`EDIT_RESUME_MISSING`, plus the standard `CLAUDE_*` codes from `runEdit`.
+
+No critic/refine pass post-edit — the user's explicit feedback is a
+stronger signal than a critic's automated review. See ADR-032 for
+context.
 
 ### Reply-to-prompt selections (no slash)
 
@@ -322,7 +350,9 @@ The critic is **read-only** (`--allowedTools Read`) and outputs structured JSON:
 - `src/db.ts` — schema, migrations, all DB helpers
 - `src/config.ts` — env validation
 - `src/runJob.ts` — main job orchestration including critic+refine
-- `src/runEdit.ts` — edit flow (--resume)
+- `src/runEdit.ts` — edit flow (--resume) for Telegram /edit
+- `src/cli-tailor.ts` — headless CLI for fresh tailor (ADR-021); compiled to `dist/cli-tailor.js`
+- `src/cli-edit.ts` — headless CLI that resumes the prior session for in-place iteration (ADR-032); compiled to `dist/cli-edit.js`
 - `src/claude.ts` — claude CLI wrappers (runTailoring, runEdit, runCritic, runRefinement)
 - `src/scrape.ts` — Playwright + stealth (no cookies per ADR-002)
 - `src/render.ts` — pandoc + typst pipeline (tectonic fallback)

@@ -1363,3 +1363,41 @@ If quality lifts noticeably, no need for lever (c). If it doesn't move (or moves
 - [ ] `/sysstatus` (admin) returns the five-section snapshot. Each section renders correctly with at least one emoji marker. Run on a healthy bot → no ❌. Run after `mv ~/.local/bin/claude /tmp/`-style break → `claude: ❌ not on PATH` line shows up.
 - [ ] Failure-streak smoke: temporarily break claude (`mv ~/.local/bin/claude /tmp/claude.bak`), have a friend send 3+ JDs in quick succession, all fail. Within seconds of the 3rd failure, admins get `🚨 Failure streak detected` DM. Restore claude. 30 min later, the same scenario alerts again (cooldown lapsed).
 - [ ] `/sysstatus` "today's log" shows ✅ + nonzero size after running the bot through stdout-capturing parent (`web.server`, `nohup ... > /dev/null`, etc.).
+
+---
+
+# Step 8 — `cli-edit.js` (cross-repo iterate flow with job-intake) — ADR-032
+
+## 8.1 — `src/cli-edit.ts` (~150 lines)
+- New headless CLI: `node dist/cli-edit.js --job-slug <slug> --instruction <text> [--output-dir PATH] --output-format json`.
+- Looks up the most recent matching job in SQLite via
+  `SELECT * FROM jobs WHERE job_id LIKE '%_<slug>' AND workspace_path
+  IS NOT NULL AND session_id IS NOT NULL ORDER BY created_at DESC LIMIT 1`.
+- Validates workspace dir + `resume.md` are still on disk.
+- Calls existing `runEdit(workspace_path, session_id, instruction)` from
+  `src/claude.ts` — same primitive Telegram `/edit` uses.
+- Re-renders PDF via `renderResumePdf(workspace_path)`; copies to
+  `--output-dir` if given.
+- Reads `last_change.txt` for the change summary (best-effort).
+- Emits the same JSON shape as `cli-tailor.js`:
+  `{ ok, pdf_path, last_change, error, duration_ms }`.
+- Specific error codes: `EDIT_NO_PRIOR_JOB` (no prior tailor for slug),
+  `EDIT_WORKSPACE_MISSING`, `EDIT_RESUME_MISSING`, plus the standard
+  `CLAUDE_*` codes from `runEdit`.
+
+## 8.2 — Smoke checklist
+- [ ] `tsc -p .` builds `dist/cli-edit.js` without errors.
+- [ ] `node dist/cli-edit.js` (no args) prints usage to stderr + exits 2.
+- [ ] `node dist/cli-edit.js --job-slug nonexistent-slug-xyz --instruction "test" --output-format json` emits JSON with `ok: false, error: contains EDIT_NO_PRIOR_JOB`.
+- [ ] On a job that DOES exist (e.g. `naukri-all-060326022621`):
+      `node dist/cli-edit.js --job-slug naukri-all-060326022621 --instruction "Make the summary line lead with platform-engineering experience" --output-dir /tmp --output-format json` returns `{ok: true, pdf_path: /tmp/<job_id>.pdf, last_change: "<one-line>"}` and the PDF differs from the previous one in the workspace (heuristic: file size or mtime).
+- [ ] After the edit, the `~/bot/users/<chat>/jobs/<job_id>/resume.md` reflects the requested change (manual diff).
+- [ ] `~/bot/logs/$(date -u +%Y-%m-%d).log` shows `event: "cli_edit_resolved_job"` then `event: "cli_edit_done"`.
+
+## 8.3 — Cross-repo wiring (job-intake side)
+Job-intake's ADR-026 documents the consumer side of this contract.
+Briefly: `src/tailor_bridge.py::run_edit` invokes this CLI;
+`src/processor/runner.py` decides between `cli-tailor.js` (fresh) and
+`cli-edit.js` (iterate) based on a sidecar JSON
+`data/jds_retailor/<safe>.json`. On `EDIT_NO_PRIOR_JOB` the processor
+falls back automatically to `cli-tailor.js`.
