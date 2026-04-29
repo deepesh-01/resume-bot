@@ -781,6 +781,31 @@ If a future tailor-pipeline change adds a new pre-edit step (e.g. always
 re-run critic before applying user feedback), bump this ADR and the
 pairing ADR-026.
 
+**Follow-up 2026-04-30 — `cli-tailor.js` now persists job + session_id
+to the SQLite jobs table** (commit 27d2fe4). Caught during job-intake's
+first end-to-end iterate test: ADR-032's `cli-edit.js` slug lookup
+(`SELECT * FROM jobs WHERE job_id LIKE '%_<slug>'`) was returning
+`EDIT_NO_PRIOR_JOB` for every processor-created job because headless
+tailors never wrote to the DB — only Telegram-bot tailors did via
+`runJob.ts`. Fix: `cli-tailor.ts` now mirrors `runJob.ts`'s DB writes:
+
+- `createJob({job_id, chat_id, workspace_path, status: 'generating'})`
+  immediately after `createJobWorkspace`.
+- `setJobSession(jobId, tailorResult.sessionId)` after a successful
+  `runTailoring` — so the session is recoverable even if a downstream
+  step (critic / refine / render) fails.
+- `setJobStatus(jobId, 'ready')` after the full pipeline succeeds, or
+  `'failed'` on caught error in the existing catch block.
+
+No behavior change for the Telegram bot flow. Headless tailors are
+now visible to admin tooling (`/sysstatus`, `/users`,
+`/restart`'s interrupted-job cleanup) AND to `cli-edit.js`'s iterate
+path. Validated end-to-end against job-intake's WaferWire row
+(`linkedin-all-4404259896`) on 2026-04-30: first re-tailor took the
+fresh-tailor fallback (no prior session), populated the DB; second
+re-tailor hit the iterate path correctly (`cli_edit_resolved_job` →
+`cli_edit_done`, $0.34 / 73s vs $0.48 / 130s for fresh).
+
 ---
 
 *New decisions append below this line.*

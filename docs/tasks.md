@@ -1401,3 +1401,35 @@ Briefly: `src/tailor_bridge.py::run_edit` invokes this CLI;
 `cli-edit.js` (iterate) based on a sidecar JSON
 `data/jds_retailor/<safe>.json`. On `EDIT_NO_PRIOR_JOB` the processor
 falls back automatically to `cli-tailor.js`.
+
+## 8.4 — `cli-tailor.ts` DB-write fix (2026-04-30, commit 27d2fe4)
+Caught while validating ADR-032 end-to-end on a real job-intake run:
+`cli-edit.js`'s slug lookup ALWAYS returned `EDIT_NO_PRIOR_JOB` for
+processor-created jobs because `cli-tailor.ts` never inserted them
+into the SQLite `jobs` table — only `runJob.ts` did, via the Telegram
+bot path. Fixed by mirroring `runJob.ts`'s DB writes:
+
+- `createJob({job_id, chat_id, workspace_path, status: 'generating'})`
+  right after `createJobWorkspace`.
+- `setJobSession(jobId, tailorResult.sessionId)` IMMEDIATELY after a
+  successful `runTailoring` (so the session is recoverable even if a
+  downstream step fails).
+- `setJobStatus(jobId, 'ready')` on full success; `'failed'` in the
+  catch block.
+
+No behavior change for Telegram. Headless tailors are now visible
+to admin tooling AND to `cli-edit.js`'s slug lookup. Validated:
+job-intake's WaferWire row went through fresh tailor (populates DB)
+→ second re-tailor correctly took the iterate path
+(`cli_edit_resolved_job` → `cli_edit_done`).
+
+## 8.5 — Smoke checklist (post-DB-write fix)
+- [ ] After running `cli-tailor.js` on a fresh JD, `~/bot/db.sqlite`
+      shows a new row: `SELECT job_id, chat_id, status, session_id
+      FROM jobs ORDER BY created_at DESC LIMIT 1` — status='ready',
+      session_id is a non-null UUID.
+- [ ] Failed run (e.g. break the pandoc binary mid-render) leaves the
+      row with status='failed', session_id still populated (so
+      `cli-edit.js` can theoretically retry against it).
+- [ ] `/sysstatus` admin command's 24h jobs section now counts
+      headless cli-tailor runs alongside Telegram ones.
