@@ -25,6 +25,7 @@ import path from 'node:path'
 import { config } from './config.js'
 import { logger } from './logger.js'
 import { makeJobId, createJobWorkspace } from './jobs.js'
+import { createJob, setJobSession, setJobStatus } from './db.js'
 import {
   runTailoring,
   runCritic,
@@ -126,14 +127,34 @@ const main = async (): Promise<void> => {
     const { jobDir } = await createJobWorkspace(args.chatId, jobId, jdText, undefined)
     logger.info({ event: 'cli_workspace_created', job_id: jobId, jobDir }, 'workspace ready')
 
+    // Insert into the jobs table so cli-edit.js (and admin tooling like
+    // /sysstatus) can find this run later. Without this row the headless
+    // tailor would be a "ghost job" — workspace on disk but invisible to
+    // the DB. ADR-032 (cli-edit) requires the row + session_id pair.
+    createJob({
+      job_id: jobId,
+      chat_id: args.chatId,
+      workspace_path: jobDir,
+      jd_url: null,
+      company: null,
+      role: null,
+      status: 'generating',
+    })
+
     // 3. Tailoring (§13.1 invocation A).
     const tailorResult = await runTailoring(jobDir)
     if (tailorResult.isError) {
+      setJobStatus(jobId, 'failed')
       throw new ClaudeError(
         'CLAUDE_FAILED',
         `tailor is_error subtype=${tailorResult.subtype}: ${tailorResult.result.slice(0, 200)}`,
       )
     }
+    // Persist the session_id IMMEDIATELY after a successful tailor — this
+    // is what cli-edit.js will look up for the iterate-on-existing flow
+    // (ADR-032). Doing it here, not after critic/refine, ensures the
+    // session is recoverable even if a downstream step fails.
+    setJobSession(jobId, tailorResult.sessionId)
     logger.info(
       {
         event: 'cli_tailor_done',
@@ -201,6 +222,14 @@ const main = async (): Promise<void> => {
       lastChange = txt.trim() || lastChange
     } catch {
       /* fine — agent may not have written one */
+    }
+
+    // Mark the job ready in the DB so cli-edit can find it later.
+    // (Errors handled in the catch block — they call setJobStatus('failed').)
+    try {
+      setJobStatus(jobId, 'ready')
+    } catch (e) {
+      logger.warn({ err: String(e), job_id: jobId }, 'setJobStatus(ready) failed')
     }
 
     result = {
